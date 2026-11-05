@@ -8,6 +8,9 @@ import { afterEach, beforeEach, describe, expect, expectTypeOf, it, vi } from 'v
 import type { UserMessage } from '@deepseek-ai/dsh-llm'
 import { renderPrompt } from '@deepseek-ai/dsh-system-prompt'
 import { Runtime } from '../src/app/runtime.ts'
+import { localCall, localSocketPath } from '../src/local/transport.ts'
+import { localTrigger } from '../src/sources/local.ts'
+import { existsSync } from 'node:fs'
 import { jobRegistry } from './fixtures/host.ts'
 import { evalsHealth } from '../src/app/views/overview.ts'
 import { mandateInstructions } from '../src/executor/dsh.ts'
@@ -134,6 +137,50 @@ async function acceptedTicket(trigger = feishu('1', '@bot 修一下回归')) {
   const ticket = runtime.store.tickets.get((result.ticket as { ticket_id: string }).ticket_id)!
   return { trigger, ticket, sessionId: `worker-${ticket.id}` }
 }
+it('closes a local socket even when stop races its startup', async () => {
+  await restart({ localRequests: true })
+  await runtime.stop()
+  await runtime.ready
+  expect(existsSync(localSocketPath(directory))).toBe(false)
+})
+it('runs local IPC through the official coordinator tools, DSH worker and persisted Outbox', async () => {
+  expect(existsSync(localSocketPath(directory))).toBe(false)
+  await (await restart({ localRequests: true }, { feishu: null })).ready
+  await expect(localCall(directory, 'GET', '/status')).resolves.toMatchObject({ configured: true, accepting: false })
+  const input = { requestId: 'local-1', threadId: 'local-conversation', text: 'Investigate the regression' }
+  await expect(localCall(directory, 'POST', '/requests', input)).rejects.toThrow('LOCAL_SOURCE_DISABLED')
+  const settings = runtime.store.settings()
+  runtime.store.saveSettings({ ...settings,
+    sources: { ...settings.sources, local: { enabled: true, config: { acceptRequests: true } } },
+    policy: { ...settings.policy, sources: { ...settings.policy.sources, local: { allowed: [{ id: `uid:${process.getuid!()}` }] } } },
+  })
+  await expect(localCall(directory, 'POST', '/requests', input)).resolves.toEqual({ result: 'stored' })
+  await runtime.idle()
+  const trigger = localTrigger(input)
+  expect(relays(runtime.masterId).some(item => item.trigger_id === trigger.id)).toBe(true)
+  const result = await route({ kind: 'accept', trigger_id: trigger.id, title: 'Investigate',
+    worktree_name: 'local-regression', acknowledgement: 'Working on it' })
+  const ticketId = (result.ticket as { ticket_id: string }).ticket_id, sessionId = `worker-${ticketId}`
+  expect(runtime.store.tickets.get(ticketId)!.assignments.at(-1)!.state).toBe('running')
+  expect(relays(sessionId)[0]).toMatchObject({ ticket_id: ticketId, trigger: { text: input.text } })
+  await runTool(sessionId, 'orchestrator_report', { state: 'progress', summary: 'Need a choice', human_action: 'Which option?' })
+  await runTool(runtime.masterId, 'orchestrator_reply', { ticket_id: ticketId, purpose: 'attention', human_action: 'Which option?', text: 'Which option?' })
+  const followup = { requestId: 'local-2', threadId: input.threadId, text: 'Option A' }
+  await localCall(directory, 'POST', '/requests', followup); await runtime.idle()
+  expect(runtime.store.triggers.disposition(localTrigger(followup).id)?.fanout).toContain(ticketId)
+  await runTool(sessionId, 'orchestrator_report', { state: 'ready', summary: 'Implemented A', human_action: null })
+  expect(runtime.store.tickets.get(ticketId)!.ended?.outcome).toBe('completed')
+  await runTool(runtime.masterId, 'orchestrator_reply', { ticket_id: ticketId, purpose: 'result', text: 'Implemented A' })
+  const replies = await localCall(directory, 'GET', `/threads/${input.threadId}`)
+  expect(replies).toMatchObject({ messages: [{ text: 'Working on it' }, { text: 'Which option?' }, { text: 'Implemented A' }] })
+  await expect(localCall(directory, 'POST', '/requests', input)).resolves.toEqual({ result: 'duplicate' })
+  await expect(localCall(directory, 'POST', '/requests', { ...input, text: 'Changed' })).rejects.toThrow('LOCAL_REQUEST_CONFLICT')
+  await (await restart({ localRequests: true }, { feishu: null })).ready
+  await expect(localCall(directory, 'GET', `/threads/${input.threadId}`)).resolves.toEqual(replies)
+  await expect(localCall(directory, 'POST', '/requests', input)).resolves.toEqual({ result: 'duplicate' })
+  await runtime.stop()
+  expect(existsSync(localSocketPath(directory))).toBe(false)
+})
 beforeEach(async () => {
   directory = mkdtempSync(join(tmpdir(), 'orchestrator-runtime-'))
   vi.spyOn(Commands.prototype, 'gh').mockImplementation(async args => args[1] === 'user' ? { login: 'agent-bot' } : args[1]?.includes('/pulls/') ? { state: 'open', user: { login: 'agent-bot' }, html_url: 'https://github.com/acme/widgets/pull/' + args[1].split('/').at(-1), head: { ref: `agent/${String(runtime.store.tickets.list()[0]?.execution?.name)}`, sha: 'head-1', repo: { full_name: 'acme/widgets' } } } : { default_branch: 'master', permissions: { push: true } })

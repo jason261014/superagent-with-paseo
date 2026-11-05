@@ -294,7 +294,9 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/paseo-control/journal.ts` | SQLite-backed Paseo operation identities and reconciliation; it is not a running executor |
 | `src/delivery/snapshot.ts` | Private selected-file snapshots and content verification; not wired to ticket acceptance |
 | `src/executor/paseo.ts` | Optional Paseo Executor foundation; not installed in the Runtime |
-| `src/sources/local.ts` | Disabled local Source primitives, without a registered transport or listener |
+| `src/sources/local.ts` | Default-closed local Source/Channel, atomic replay checks and ordered persistent replies through the official Outbox |
+| `src/local/transport.ts` | Opt-in owner-only Unix socket, lifecycle and bounded request client for the official Runtime |
+| `src/local/cli.ts` | Submit explicit local requests and read status/replies without starting a host |
 | `src/index.ts` | The main plugin entry: reads the machine settings, starts the Runtime, and gives it the restart that a save of a Source's account uses |
 | `src/deployment.ts` | The plugin `Config` and `Machine`; `resolveDeployment` and `resolveFeishuBot` read the repository and the accounts from the Source settings, each CLI run as Executor shells run it; `SETUP_FIELDS` lists the Source fields setup reads. The code names no person, account or organization |
 | `src/setup.ts` | Setup problems: `SetupError`, with a code, the place that fixes it and the English text the log, the main Session and the panel share |
@@ -411,7 +413,8 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/paseo-client.spec.ts` | Paseo adapter identity, pagination and interruption boundaries |
 | `tests/paseo-control-journal.spec.ts` | Durable operation identity and uncertain-result reconciliation |
 | `tests/paseo-executor.spec.ts` | Paseo Executor effect and assignment boundaries |
-| `tests/paseo-local-source.spec.ts` | Local Source admission and explicit request mapping |
+| `tests/paseo-local-source.spec.ts` | Local admission, replay conflicts, questions, follow-ups and original completion through Engine/Outbox |
+| `tests/local-transport.spec.ts` | Unix socket permissions, CLI behavior, request bounds and transport shutdown |
 | `tests/delivery-snapshot.spec.ts` | Selected-file snapshots and content verification |
 | `tests/core-engine.spec.ts` | Domain rules on in-memory repositories: receiving, Eval, fan-out, resume and stop, interrupted Assignments, the pause, Policy changes, reports and outcomes, attaching, replies, failed deliveries and dismissed problems |
 | `tests/stage.spec.ts` | The Ticket stages, row by row |

@@ -1,8 +1,9 @@
 # Superagent with Paseo 本地优先设计
 
 > 日期：2026-11-05
-> 状态：讨论稿，等待审阅；本文描述目标，不表示功能已经交付。
+> 状态：保留为较长期设计；用户随后确认本轮收敛到最小适配验证。
 > 基础：DeepSeek `dsh-superagent-prototype` fork，当前开发基线 `cbc141c`。
+> 本轮以 [最小适配计划](../plans/2026-11-05-superagent-with-paseo-local.md) 为准：先改本地消息入口，再适配 DSH 会话；保留官方任务、完成语义、Store 和调度。下文的独立宿主、交付版本及接受状态机均暂缓。
 
 ## 1. 目标和使用边界
 

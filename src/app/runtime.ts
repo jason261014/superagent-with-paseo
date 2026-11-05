@@ -16,6 +16,8 @@ import { lockSync } from 'proper-lockfile'
 import { Engine, key, reasonText, type EngineForSettings, type ReceiveResult, type Ticket, type Trigger } from '../core/index.ts'
 import { allowedSender, settingsPolicy } from '../policy.ts'
 import { SourceRegistry } from '../sources/registry.ts'
+import { createLocalSource, type LocalRequest } from '../sources/local.ts'
+import { listenLocal } from '../local/transport.ts'
 import { Commands } from '../infra/commands.ts'
 import type { Deployment, Machine } from '../deployment.ts'
 import { environmentOf, ticketEnvironment, type Variable } from './execution-environment.ts'
@@ -62,6 +64,9 @@ export class Runtime extends Service implements SourceHost {
   readonly prompts: Prompts
   readonly effects: Effects
   readonly sources: SourceRegistry
+  readonly local: ReturnType<typeof createLocalSource>
+  private localTransport?: Awaited<ReturnType<typeof listenLocal>>
+  private localOpening?: ReturnType<typeof listenLocal>
   readonly commands: Commands
   readonly sessions: Sessions
   readonly settings: Settings
@@ -112,6 +117,8 @@ export class Runtime extends Service implements SourceHost {
           .catch(() => { /* sync() records its failure in health. */ })
         return () => {}
       })
+      this.local = createLocalSource(store)
+      this.disposers.push(sources.register(this.local.kind))
       const links: LinkHost = { store, links: this.sourceLinks, commands, sources, lifetime: this.lifetime }
       const link = (trigger: Trigger, signal?: AbortSignal) => sourceLink(links, trigger, signal)
       const environment = (ticket: Ticket) => this.ticketEnvironment(ticket)
@@ -192,6 +199,17 @@ export class Runtime extends Service implements SourceHost {
   }
   checkSetup(): void { this.setup.check() }
   receive(trigger: Trigger): ReceiveResult { return this.passes.receive(trigger) }
+  /** Trusted local operator path. The socket supplies access control; the Engine still applies Source/Policy admission. */
+  receiveLocal(request: LocalRequest): ReceiveResult {
+    if (!this.localStatus().accepting) throw new Error('LOCAL_SOURCE_DISABLED')
+    return this.local.receive(request, trigger => this.passes.receive(trigger))
+  }
+  private localStatus() {
+    const source = this.sources.instance('local')
+    return { configured: this.configured(), paused: this.paused(),
+      accepting: !this.closing() && !this.lifetime.aborted && !!source?.enabled && source.config.acceptRequests === true,
+      actor: `uid:${process.getuid?.()}` }
+  }
   idle(): Promise<void> { return this.passes.idle() }
   pump(): Promise<void> { return this.passes.pump() }
   sendReplies(): Promise<void> { return this.outbox.sent() }
@@ -201,6 +219,13 @@ export class Runtime extends Service implements SourceHost {
   private async initialize(): Promise<void> {
     // Register management HTTP routes before setup completes so operators can fix setup problems in the UI.
     this.disposers.push(registerHttp(this.ctx, this.httpHost()))
+    if (this.machine.localRequests) {
+      this.localTransport = await (this.localOpening = listenLocal(this.machine.stateDir, {
+        receive: request => this.receiveLocal(request), replies: thread => this.local.replies(thread), status: () => this.localStatus(),
+      }))
+      this.lifetime.addEventListener('abort', () => { void this.localTransport?.close() }, { once: true })
+      if (this.closing() || this.lifetime.aborted) { await this.localTransport.close(); return }
+    }
     if (!await this.setup.run(this.store.settings())) {
       this.runtimeHealth.set({ ...health('paused', 'setupPending'), at: now() })
       return
@@ -230,6 +255,7 @@ export class Runtime extends Service implements SourceHost {
   private async shutdown(): Promise<void> {
     this.closingFlag = true; const passes = this.passes.stop(); this.stopped.abort()
     try {
+      await this.localOpening?.then(transport => transport.close(), () => {})
       this.assessor.stop()
       const ids = [this.masterId, ...this.store.tickets.list().map(ticket => workerSessionId(ticket.id))]
       const agents = ids.map(id => this.ctx.agents.get(id as SessionId)).filter((agent): agent is Agent => agent !== undefined)

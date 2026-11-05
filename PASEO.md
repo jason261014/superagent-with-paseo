@@ -1,22 +1,51 @@
 # Superagent with Paseo
 
-This fork builds on the [DeepSeek Super Agent research prototype](https://github.com/deepseek-ai/dsh-superagent-prototype), retaining its MIT license and attribution. Its direction is to reuse the prototype's task, event and durable-effect model with Paseo sessions and independently reviewable deliveries.
+This fork builds on the [DeepSeek Super Agent research prototype](https://github.com/deepseek-ai/dsh-superagent-prototype), retaining its MIT license and attribution. The current milestone validates the smallest possible changes to message entry/output and session execution. Engine, Policy, Ticket, Assignment, Subscriptions, Store, Effects, Outbox, prompts and upstream completion semantics remain in place.
 
 ## Current status
 
-The upstream DSH Runtime remains the only wired execution path. The Paseo session adapter, assignment operation guard and selected-file snapshot are foundations for integration; adding them does **not** make the DSH router or worker run on Paseo. No GitHub or Feishu listener is enabled by these additions.
+The official Runtime now registers a default-closed local Source/Channel. An opt-in Unix socket and CLI submit explicit requests and read persisted replies. The Runtime still uses the original DSH Sessions, DshExecutor and setup, including its configured repository and agent GitHub CLI. Local input does not remove those setup dependencies.
 
-The intended path is a native CLI and a Paseo coordinator, with explicit targets and frozen task inputs. A task may have multiple assignments and delivery versions. An executor's report, a check against a delivery and the coordinator's decision to accept it are different facts. Existing upstream `ready` behavior is unchanged until the new workflow is wired and validated.
+Tests exercise the real Runtime, coordinator tools, worker report tools, Engine and Outbox, with DSH model/session services mocked. They cover acknowledgement, questions, same-thread follow-up, upstream ready → completed, persisted replies, duplicate submissions and restart. This is not a live-model validation claim.
 
-## Integration boundaries
+Separately, a dedicated DSH profile completed a real-model A/B question-and-answer task, produced and verified its result file, reported ready and sent the final local reply. Restart preserved replies and a repeated input returned duplicate without creating another ticket. A second task verified the corrected reply record format. The verification process is stopped; see the [run evidence](docs/superpowers/plans/2026-11-05-local-entry-validation.md).
 
-- Keep upstream's transactional Engine and durable effects. Before retrying an uncertain create or send, reconcile its stable identity; an incomplete search must remain unknown.
-- The Executor currently relies on its caller to freeze configuration and provide separate, verified workspaces. It does not yet create worktrees or enforce cross-assignment isolation.
-- Only accept a worker report after checking its assignment identity inside the same transaction that records it. Delivery, session history and actual model consumption are distinct observations.
-- A worker can respond before the initial send is marked running. A future report bridge must durably buffer and replay such reports; it must also associate input IDs with evidence of actual consumption before final reports are enabled.
-- A snapshot contains only explicitly selected files and deletions. Persist its returned manifest digest independently. Capture a quiescent trusted workspace: this is neither a filesystem-wide atomic snapshot nor a security sandbox, and it currently does not promise crash durability. Concurrent replacement of a parent directory can evade path checks; do not use it as an isolation boundary against an active or hostile worker.
-- Paseo interruption requests must target one verified session. A stopped turn does not prove that every child process exited.
-- There is no verified Paseo message-queue barrier yet. After any send, even a currently idle snapshot cannot establish that a delayed message will not wake the session; the experimental Executor leaves its stop effect unresolved.
-- Do not silently convert DSH `ready` or passing checks into acceptance. The integration still needs versioned delivery, a review decision and the worker reporting bridge.
+Paseo is **not yet wired** as the coordinator or worker. The existing Paseo client, operation journal, experimental executor and delivery snapshot are earlier foundations. The experimental executor's delivery/acceptance restrictions are not the target for this milestone. The [active plan](docs/superpowers/plans/2026-11-05-superagent-with-paseo-local.md) replaces the [deferred broader plan](docs/superpowers/plans/2026-11-05-superagent-local-future-enhancements.md).
 
-Before declaring the path usable, wire an Executor and a reporting bridge into the Runtime, add a native input path, then exercise creation, rework, recovery and stop against an explicitly chosen test environment. Cross-host operation, isolation and source adapters require their own verification.
+## Local entry
+
+Build with `pnpm build`. In a dedicated DSH profile linked to this checkout, configure the existing plugin:
+
+```yaml
+- id: dsh-superagent
+  config:
+    stateDir: /absolute/private/state
+    localRequests: true
+- id: dsh-superagent-github
+  disabled: true
+- id: dsh-superagent-feishu
+  disabled: true
+```
+
+The last two entries keep external watchers off. Retain the GitHub repository/CLI values required by official setup. In the Superagent management panel, enable **Local requests → Receive local requests**, then add the current OS account (`uid:<id -u>`) to **Policy → Local requests → Allowed local user IDs**. The socket does not bypass that policy. Restart is required when changing `localRequests`; the Source and Policy settings apply live.
+
+```sh
+node bin/superagent-local.mjs --state-dir /absolute/private/state status
+node bin/superagent-local.mjs --state-dir /absolute/private/state submit \
+  --request-id request-1 --thread-id conversation-1 --text 'Investigate the regression'
+node bin/superagent-local.mjs --state-dir /absolute/private/state replies --thread-id conversation-1
+node bin/superagent-local.mjs --state-dir /absolute/private/state submit \
+  --request-id request-2 --thread-id conversation-1 --text 'Use option A'
+```
+
+`stored` means the official Engine received the request; it does not mean the coordinator accepted or completed it. Use the same request ID, thread and text when retrying a submission with an uncertain result. Reusing an ID with changed content is rejected. A new request ID in the same thread becomes a follow-up under the original subscription rules. Replies are snapshots; these commands never start a service or watch a conversation.
+
+The socket is `<stateDir>/local-ipc/s`, inside an owner-owned `0700` directory, with socket mode `0600`. Existing unsafe directories, symlinks and non-socket files are rejected. Keep the socket path within 103 UTF-8 bytes for macOS. Runtime holds its existing state lock through socket shutdown and reclaims its stale socket after a crash.
+
+Access means the **same trusted OS account**, including programs running under it; it cannot prove a human typed a request or isolate a hostile worker sharing that account. The operator socket must not be used as an agent report channel or exposed over TCP. A separate constrained tool bridge is required for Paseo.
+
+## Remaining session adaptation
+
+Extract only session creation, delivery, observation, tool/resource/report callbacks and interruption where the actual DSH integration requires it. Preserve the official domain workflow, including ready reports that complete without a PR. Test DSH first, then compare the same scenario on Paseo.
+
+Reuse stable request identities and uncertain-result reconciliation from the existing Paseo adapter. An incomplete lookup remains unknown; idle is neither business completion nor proof all child processes stopped. No verified Paseo queue fence exists yet. Independent delivery storage, an acceptance state machine, generic runtime plugins and broad host restructuring remain deferred.
