@@ -1,6 +1,6 @@
 /** Owner-only Unix socket for explicit operator requests; not an HTTP/TCP ingress or an agent report bridge. */
 import { chmodSync, lstatSync, mkdirSync, unlinkSync } from 'node:fs'
-import { createServer, request as httpRequest } from 'node:http'
+import { createServer, request as httpRequest, type RequestListener } from 'node:http'
 import { join } from 'node:path'
 import type { Socket } from 'node:net'
 import type { LocalRequest } from '../sources/local.ts'
@@ -20,9 +20,9 @@ const errorCode = (error: unknown): string => {
 }
 
 /** Caller must hold the Runtime state-directory lock until close() resolves. */
-export async function listenLocal(stateDir: string, host: LocalHost): Promise<{ close(): Promise<void> }> {
+export async function listenPrivate(stateDir: string, name: 'local-ipc' | 'agent-ipc', listener: RequestListener): Promise<{ close(): Promise<void> }> {
   if (typeof process.getuid !== 'function') throw new Error('LOCAL_UID_UNAVAILABLE')
-  const uid = process.getuid(), directory = join(stateDir, 'local-ipc'), path = localSocketPath(stateDir)
+  const uid = process.getuid(), directory = join(stateDir, name), path = join(directory, 's')
   if (Buffer.byteLength(path) > 103) throw new Error('LOCAL_SOCKET_PATH_TOO_LONG')
   const parent = lstatSync(stateDir)
   if (!parent.isDirectory() || parent.uid !== uid || (parent.mode & 0o022)) throw new Error('LOCAL_UNSAFE_DIRECTORY')
@@ -36,7 +36,25 @@ export async function listenLocal(stateDir: string, host: LocalHost): Promise<{ 
     unlinkSync(path)
   } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
   const sockets = new Set<Socket>()
-  const server = createServer(async (req, res) => {
+  const server = createServer(listener)
+  server.requestTimeout = 10_000
+  server.headersTimeout = 10_000
+  server.on('connection', socket => {
+    sockets.add(socket); socket.on('close', () => sockets.delete(socket))
+    socket.setTimeout(60_000, () => socket.destroy())
+  })
+  await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(path, () => { server.off('error', reject); resolve() }) })
+  try { chmodSync(path, 0o600) } catch (error) { await new Promise<void>(resolve => server.close(() => resolve())); throw error }
+  let closing: Promise<void> | undefined
+  return { close: () => closing ??= new Promise<void>(resolve => {
+    server.close(() => resolve())
+    for (const socket of sockets) socket.destroy()
+  }) }
+}
+
+/** Caller holds the Runtime state lock; operator routes never accept agent reports. */
+export async function listenLocal(stateDir: string, host: LocalHost): Promise<{ close(): Promise<void> }> {
+  return listenPrivate(stateDir, 'local-ipc', async (req, res) => {
     const reply = (status: number, value: unknown) => {
       const text = JSON.stringify(value)
       res.writeHead(status, { 'content-type': 'application/json', 'connection': 'close' }); res.end(text)
@@ -62,27 +80,19 @@ export async function listenLocal(stateDir: string, host: LocalHost): Promise<{ 
       reply(200, { result })
     } catch (error) { reply(errorCode(error) === 'LOCAL_REQUEST_CONFLICT' ? 409 : 400, { error: errorCode(error) }) }
   })
-  server.requestTimeout = 10_000
-  server.headersTimeout = 10_000
-  server.on('connection', socket => {
-    sockets.add(socket); socket.on('close', () => sockets.delete(socket))
-    socket.setTimeout(10_000, () => socket.destroy())
-  })
-  await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(path, () => { server.off('error', reject); resolve() }) })
-  try { chmodSync(path, 0o600) } catch (error) { await new Promise<void>(resolve => server.close(() => resolve())); throw error }
-  let closing: Promise<void> | undefined
-  return { close: () => closing ??= new Promise<void>(resolve => {
-    server.close(() => resolve())
-    for (const socket of sockets) socket.destroy()
-  }) }
 }
 
 /** Connect only to an existing host; never launch one or retry a write with a new identity. */
 export async function localCall(stateDir: string, method: 'GET' | 'POST', path: string, body?: unknown): Promise<unknown> {
+  return privateCall(localSocketPath(stateDir), method, path, body)
+}
+/** Bounded request to an existing private socket; never retries a write automatically. */
+export async function privateCall(socketPath: string, method: 'GET' | 'POST', path: string, body?: unknown, token?: string): Promise<unknown> {
   const text = body === undefined ? undefined : JSON.stringify(body)
   return new Promise((resolve, reject) => {
-    const req = httpRequest({ socketPath: localSocketPath(stateDir), method, path,
-      headers: text === undefined ? {} : { 'content-type': 'application/json', 'content-length': Buffer.byteLength(text) } }, res => {
+    const req = httpRequest({ socketPath, method, path,
+      headers: { ...(token ? { authorization: `Bearer ${token}` } : {}),
+        ...(text === undefined ? {} : { 'content-type': 'application/json', 'content-length': Buffer.byteLength(text) }) } }, res => {
       let size = 0
       const chunks: Buffer[] = []
       res.on('data', (chunk: Buffer) => {

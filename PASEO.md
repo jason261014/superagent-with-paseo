@@ -10,7 +10,11 @@ Tests exercise the real Runtime, coordinator tools, worker report tools, Engine 
 
 Separately, a dedicated DSH profile completed a real-model A/B question-and-answer task, produced and verified its result file, reported ready and sent the final local reply. Restart preserved replies and a repeated input returned duplicate without creating another ticket. A second task verified the corrected reply record format. The verification process is stopped; see the [run evidence](docs/superpowers/plans/2026-11-05-local-entry-validation.md).
 
-Paseo is **not yet wired** as the coordinator or worker. The existing Paseo client, operation journal, experimental executor and delivery snapshot are earlier foundations. The experimental executor's delivery/acceptance restrictions are not the target for this milestone. The [active plan](docs/superpowers/plans/2026-11-05-superagent-with-paseo-local.md) replaces the [deferred broader plan](docs/superpowers/plans/2026-11-05-superagent-local-future-enhancements.md).
+Paseo is now an opt-in coordinator/worker backend. The Runtime keeps the DSH Engine, Policy, Ticket, Assignment, Effects, Outbox and prompt composition, while `PaseoSessions` creates labelled agents and sends stable, journaled messages. A private owner-only MCP bridge exposes the original `orchestrator_*` tools; worker report calls carry a non-claimable ticket/assignment binding and durable receipts replay reports that arrive before launch confirmation. The experimental executor restrictions were removed so `ready` still completes a ticket under the upstream semantics.
+
+Enable it in the machine profile with `paseo.url`, `paseo.orchestrator`, `paseo.worker`, their mode IDs, and an absolute `bridgeCommand` pointing to `bin/superagent-mcp.mjs`. Keep `localRequests: true` and the local Source/Policy settings for the operator socket. The bridge socket is separate from the operator socket and is never a worker report transport.
+
+The Paseo backend has explicit limits: it does not provide DSH's silent history injection, child-job completion evidence, or a queue fence proving that a previously sent message cannot still arrive. Background notices are persisted and attached to the next coordinator message. Interruption records the exact request and fresh runtime observation; an idle observation is not treated as proof that unknown children have stopped.
 
 ## Local entry
 
@@ -44,8 +48,8 @@ The socket is `<stateDir>/local-ipc/s`, inside an owner-owned `0700` directory, 
 
 Access means the **same trusted OS account**, including programs running under it; it cannot prove a human typed a request or isolate a hostile worker sharing that account. The operator socket must not be used as an agent report channel or exposed over TCP. A separate constrained tool bridge is required for Paseo.
 
-## Remaining session adaptation
+## Session adaptation
 
-Extract only session creation, delivery, observation, tool/resource/report callbacks and interruption where the actual DSH integration requires it. Preserve the official domain workflow, including ready reports that complete without a PR. Test DSH first, then compare the same scenario on Paseo.
+The narrow session port is implemented in `src/paseo/sessions.ts`, the report receipt path in `src/paseo/reports.ts`, and the role-bound MCP bridge in `src/paseo/bridge.ts` / `src/paseo/mcp.ts`. The official DSH path remains intact and still passes its full regression suite.
 
 Reuse stable request identities and uncertain-result reconciliation from the existing Paseo adapter. An incomplete lookup remains unknown; idle is neither business completion nor proof all child processes stopped. No verified Paseo queue fence exists yet. Independent delivery storage, an acceptance state machine, generic runtime plugins and broad host restructuring remain deferred.

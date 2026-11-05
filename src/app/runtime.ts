@@ -11,6 +11,7 @@ import type {} from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-skill'
 import type {} from '@deepseek-ai/dsh-subprocess'
 import { mkdirSync } from 'node:fs'
+import { stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import { lockSync } from 'proper-lockfile'
 import { Engine, key, reasonText, type EngineForSettings, type ReceiveResult, type Ticket, type Trigger } from '../core/index.ts'
@@ -22,7 +23,13 @@ import { Commands } from '../infra/commands.ts'
 import type { Deployment, Machine } from '../deployment.ts'
 import { environmentOf, ticketEnvironment, type Variable } from './execution-environment.ts'
 import type { SetupProblem } from '../setup.ts'
-import { DshExecutor, sourceTrigger, triggerMessage, workerSessionId } from '../executor/dsh.ts'
+import { DshExecutor, sourceTrigger, triggerMessage, workerSessionId, ticketExecution, prepareWorkerDirectory, inputMessage, batchOf, batchLine } from '../executor/dsh.ts'
+import { PaseoExecutor } from '../executor/paseo.ts'
+import { PaseoSessions, type SessionPort } from '../paseo/sessions.ts'
+import { PaseoToolBridge } from '../paseo/bridge.ts'
+import { PaseoReports } from '../paseo/reports.ts'
+import { createPaseoAdapter, type PaseoAdapter } from '../paseo/client.ts'
+import { PaseoOperationJournal } from '../paseo-control/journal.ts'
 import { ticketCard } from './cards.ts'
 import { MasterAssessor } from './assessment.ts'
 import { KV } from '../kv.ts'
@@ -69,9 +76,12 @@ export class Runtime extends Service implements SourceHost {
   private localTransport?: Awaited<ReturnType<typeof listenLocal>>
   private localOpening?: ReturnType<typeof listenLocal>
   readonly commands: Commands
-  readonly sessions: Sessions
+  readonly sessions: SessionPort
   readonly settings: Settings
-  readonly executor: DshExecutor
+  readonly executor: Pick<DshExecutor, 'prepare' | 'start' | 'stop' | 'deliver' | 'install' | 'resume' | 'shutdown' | 'dispose' | 'activeCount'>
+  private paseo?: PaseoAdapter
+  private bridge?: PaseoToolBridge
+  private bridgeOpening?: Promise<void>
   readonly assessor: MasterAssessor
   readonly outbox: Outbox
   readonly engine: Engine
@@ -124,20 +134,65 @@ export class Runtime extends Service implements SourceHost {
       const link = (trigger: Trigger, signal?: AbortSignal) => sourceLink(links, trigger, signal)
       const environment = (ticket: Ticket) => this.ticketEnvironment(ticket)
       const resources: ResourceHost = { store, pages: new TextCache(4_000_000), prompts, commands, masterId,
-        transcript: async id => (await ctx.sessionController.inspect(id as SessionId)).events.map(transcriptEntry),
-        modelCatalog: () => ctx.sessionController.modelCatalog(),
+        transcript: async id => {
+          if (machine.paseo) throw new Error('Paseo transcript projection is not yet available; use the Paseo session timeline')
+          return (await ctx.sessionController.inspect(id as SessionId)).events.map(transcriptEntry)
+        },
+        modelCatalog: () => {
+          if (machine.paseo) throw new Error('Paseo models are configured in the profile paseo section; DSH model settings do not apply')
+          return ctx.sessionController.modelCatalog()
+        },
         promptVersion: id => this.sessions.promptVersion(id), mayRead: (id, revision) => this.sessions.mayRead(id, revision),
         feishuPageSize: () => feishuSettings(sources).readPageSize, sourceLink: link }
-      const sessions = this.sessions = new Sessions({ context: ctx, store, prompts, effects, health: board.claim('models'), masterId,
+      let reports: PaseoReports | undefined
+      const paseo = this.paseo = machine.paseo ? createPaseoAdapter({ url: machine.paseo.url }) : undefined
+      const journal = paseo ? new PaseoOperationJournal(store.db) : undefined
+      const bridge = this.bridge = paseo ? new PaseoToolBridge(machine.stateDir, { store, lifetime: this.lifetime,
+        tools: (binding, requestId) => {
+          if (binding.role === 'orchestrator') return mainTools(this.toolHost, { id: binding.sessionId })
+          const ticket = store.tickets.get(binding.ticketId)
+          if (!ticket) throw new Error('Unknown worker ticket')
+          return executorTools({ ...this.toolHost, submitReport: (report, claim) =>
+            reports!.receive(binding.ticketId, binding.assignmentId, requestId, report, claim) }, ticket)
+        } }) : undefined
+      const sessions = this.sessions = paseo ? new PaseoSessions({ store, prompts, effects, masterId, stateDir: machine.stateDir,
+        config: machine.paseo!, paseo, journal: journal!, bridge: bridge!, lifetime: this.lifetime, environment }) : new Sessions({ context: ctx, store, prompts, effects, health: board.claim('models'), masterId,
         lifetime: this.lifetime,
         closing: () => this.closing(), environment,
         tools: (agent, ticket) => ticket ? executorTools(this.toolHost, ticket) : mainTools(this.toolHost, { id: agent.id,
           readImage: (source, commands, message, key, signal) => source.image(agent, commands, message, key, machine.stateDir, signal) }) })
       const policyChanged: EngineForSettings['policyChanged'] = (from, to, effects) => { this.engine.policyChanged(from, to, effects) }
       this.settings = new Settings({ store, sources, engine: { policyChanged }, health: board, context: ctx, lifetime: this.lifetime, sessions,
+        ...(paseo ? { validateModel: async () => { throw new Error('Configure Paseo role models in the profile paseo section') } } : {}),
         sourceHost: this, setup, requestPass: () => { this.passes.request() } })
-      this.executor = new DshExecutor({ context: ctx, get engine() { return runtime.engine }, store, effects, health: board.claim('worker'), machine,
-        lifetime: this.lifetime, sessions, closing: () => this.closing(), paused: () => this.paused(), environment, sourceLink: link,
+      if (paseo) {
+        const managed = sessions as PaseoSessions
+        const executor = new PaseoExecutor({ store, effects, journal: journal!, paseo, get engine() { return runtime.engine },
+          createOptions: (ticket, assignment) => managed.workerOptions(ticket, assignment),
+          created: (ticket, assignment, id) => managed.workerCreated(ticket, assignment, id),
+          started: (ticket, assignment) => reports!.replay(ticket, assignment),
+          paused: () => this.paused() || this.closing(), maxWorkers: () => store.settings().executor.maxWorkers,
+          prepareWorkspace: async ticket => {
+            if (!await stat(ticket.execution!.directory).then(() => true, () => false)) {
+              await prepareWorkerDirectory({ context: ctx, store, environment, lifetime: this.lifetime }, ticket)
+            }
+          },
+          initialText: async ticket => {
+            const trigger = sourceTrigger({ store }, ticket)
+            return JSON.stringify({ ticket_id: ticket.id, title: ticket.title, assignment: ticket.execution?.assignment,
+              ...(trigger ? { trigger: triggerMessage(trigger, await link(trigger)) } : {}), batch: batchOf({ store }, ticket).map(batchLine),
+              ...(ticket.assignments.length > 1 ? { note: 'Continue this ticket from its existing files and reports. Read ticket/' + ticket.id + '/inputs before work; do not repeat completed actions.' } : {}) })
+          },
+          inputText: async (_ticket, input) => {
+            const trigger = input.kind === 'trigger' ? store.triggers.get(input.triggerId) : undefined
+            return inputMessage(input, trigger ? triggerMessage(trigger, await link(trigger)) : undefined) ?? 'Historical input; no new work.'
+          } })
+        this.executor = Object.assign(executor, { prepare: (ticket: Ticket, outcome: Parameters<DshExecutor['prepare']>[1]) =>
+          ({ ...ticket, execution: ticketExecution(ticket, outcome, store.settings(), machine.stateDir) }) })
+        reports = new PaseoReports({ store, report: (ticket, assignment, report) => executor.report(ticket, assignment, report),
+          relay: (id, text) => sessions.relay(id, text) })
+      } else this.executor = new DshExecutor({ context: ctx, get engine() { return runtime.engine }, store, effects, health: board.claim('worker'), machine,
+        lifetime: this.lifetime, sessions: sessions as Sessions, closing: () => this.closing(), paused: () => this.paused(), environment, sourceLink: link,
         repliedTo: trigger => repliedTo({ store, sources }, trigger) })
       this.assessor = new MasterAssessor({ get engine() { return runtime.engine }, commands, get deployment() { return setup.deployment }, effects,
         settings: () => store.settings(), paused: () => this.paused(), threadContext: trigger => sources.threadContext(trigger),
@@ -236,6 +291,11 @@ export class Runtime extends Service implements SourceHost {
     }
     this.sessions.install()
     this.executor.install()
+    if (this.closing() || this.lifetime.aborted) return
+    if (this.bridge) {
+      await (this.bridgeOpening = this.bridge.start())
+      if (this.closing() || this.lifetime.aborted) { await this.bridge.close(); return }
+    }
     await this.sessions.ensure(this.masterId, this.machine.stateDir, 'dsh-superagent orchestrator', 'orchestrator')
     for (const id of this.settings.syncable()) await this.settings.sync(id).catch(() => { /* sync() records its failure in health. */ })
     // If stop() was called while awaiting setup, session creation, or policy sync, do not start background loops.
@@ -261,12 +321,16 @@ export class Runtime extends Service implements SourceHost {
     try {
       await this.localOpening?.then(transport => transport.close(), () => {})
       this.assessor.stop()
+      await this.bridgeOpening?.catch(() => {})
+      await this.bridge?.close()
       const ids = [this.masterId, ...this.store.tickets.list().map(ticket => workerSessionId(ticket.id))]
       const agents = ids.map(id => this.ctx.agents.get(id as SessionId)).filter((agent): agent is Agent => agent !== undefined)
       for (const agent of agents) agent.cancel({ kind: 'user' }, { keepInbox: true })
       await Promise.allSettled([passes, this.effects.drain(), ...agents.map(agent => agent.whenIdle())])
       // The workers' jobs and subagents stop too: their ends would start worker turns without the tool limits released below.
       await this.executor.shutdown()
+      if (this.sessions instanceof PaseoSessions) await this.sessions.shutdown()
+      await this.paseo?.close()
       this.executor.dispose()
       this.sessions.dispose()
       for (const dispose of this.disposers.reverse()) dispose()

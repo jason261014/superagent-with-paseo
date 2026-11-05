@@ -9,6 +9,10 @@ import type { UserMessage } from '@deepseek-ai/dsh-llm'
 import { renderPrompt } from '@deepseek-ai/dsh-system-prompt'
 import { Runtime } from '../src/app/runtime.ts'
 import { localCall, localSocketPath } from '../src/local/transport.ts'
+import { privateCall } from '../src/local/transport.ts'
+import { bridgeSocketPath } from '../src/paseo/bridge.ts'
+import * as paseoClient from '../src/paseo/client.ts'
+import type { PaseoAgentCreateOptions } from '@getpaseo/client'
 import { localTrigger } from '../src/sources/local.ts'
 import { existsSync } from 'node:fs'
 import { jobRegistry } from './fixtures/host.ts'
@@ -180,6 +184,71 @@ it('runs local IPC through the official coordinator tools, DSH worker and persis
   await expect(localCall(directory, 'POST', '/requests', input)).resolves.toEqual({ result: 'duplicate' })
   await runtime.stop()
   expect(existsSync(localSocketPath(directory))).toBe(false)
+})
+it('runs original coordinator/worker tools over the Paseo bridge, buffers early reports and restores bindings', async () => {
+  const created = new Map<string, PaseoAgentCreateOptions>(), sent = new Map<string, string>()
+  let early: unknown
+  const call = async (agentId: string, name: string, args: unknown, requestId = name) => {
+    const config = created.get(agentId)!.config.mcpServers!.superagent!
+    if (config.type !== 'stdio') throw new Error('Expected stdio')
+    return privateCall(bridgeSocketPath(directory), 'POST', '/call', { requestId, name, arguments: args }, config.env!.SUPERAGENT_TOOL_TOKEN)
+  }
+  const adapter: paseoClient.PaseoAdapter = {
+    create: vi.fn(async options => { const agentId = 'paseo-' + created.size; created.set(agentId, options); return { agentId, cwd: options.cwd } }),
+    send: vi.fn(async (id, text, messageId) => {
+      sent.set(messageId, text)
+      if (created.get(id)?.labels?.superagentAssignment && !early) early = await call(id, 'orchestrator_report',
+        { state: 'progress', summary: 'Need choice', human_action: 'A or B?' }, 'early-question')
+    }),
+    findByLabels: vi.fn(async () => ({ kind: 'unknown' as const, matches: [], reason: 'not needed' })),
+    findMessage: vi.fn(async (_id, messageId) => sent.has(messageId) ? { kind: 'present' as const, entry: {}, epoch: '1' } : { kind: 'unknown' as const, reason: 'not seen' }),
+    snapshot: vi.fn(async id => ({ agentId: id, cwd: created.get(id)?.cwd ?? '', status: 'idle', activeTurn: null,
+      pendingPermissions: [], observedAt: '', unknownChildren: true as const })),
+    interrupt: vi.fn(async () => ({ requestSent: true as const, runtime: null })), archive: vi.fn(async () => ({ archivedAt: '' })), close: vi.fn(async () => {}),
+  }
+  vi.spyOn(paseoClient, 'createPaseoAdapter').mockReturnValue(adapter)
+  const machine = { localRequests: true, paseo: { url: 'ws://127.0.0.1:6767/ws', orchestrator: 'codex/test', worker: 'claude-pool/test',
+    orchestratorMode: 'auto-review', workerMode: 'auto', bridgeCommand: '/test/superagent-mcp.mjs' } }
+  await (await restart(machine, { feishu: null })).ready
+  const settings = runtime.store.settings()
+  runtime.store.saveSettings({ ...settings, executor: { ...settings.executor, prepare: '' },
+    sources: { ...settings.sources, local: { enabled: true, config: { acceptRequests: true } } },
+    policy: { ...settings.policy, sources: { ...settings.policy.sources, local: { allowed: [{ id: 'uid:' + process.getuid!() }] } } } })
+  const request = { requestId: 'paseo-1', threadId: 'paseo-thread', text: 'Ask A or B then write the result' }
+  await localCall(directory, 'POST', '/requests', request); await runtime.idle()
+  const trigger = localTrigger(request)
+  await call('paseo-0', 'orchestrator_route', { decisions: [{ kind: 'accept', trigger_id: trigger.id,
+    title: 'Choose option', worktree_name: 'choose-option', acknowledgement: 'Choosing option' }] })
+  await runtime.idle()
+  const ticket = runtime.store.tickets.list()[0]!, assignment = ticket.assignments.at(-1)!
+  expect(early).toMatchObject({ reported: false, queued: true })
+  expect(ticket.attention?.question).toBe('A or B?')
+  expect(ticket.assignments.at(-1)?.state).toBe('running')
+  const worker = created.get('paseo-1')!
+  expect(worker.config.systemPrompt).toContain('dsh-superagent prompt revision')
+  expect(worker.config.systemPrompt).toContain('Paseo')
+  expect(worker.cwd).toBe(ticket.execution!.directory)
+  await expect(call('paseo-1', 'orchestrator_route', {})).rejects.toThrow('unavailable for this role')
+  await expect(call('paseo-1', 'orchestrator_read', { resource: 'settings' })).rejects.toThrow()
+  await call('paseo-0', 'orchestrator_reply', { ticket_id: ticket.id, purpose: 'attention', human_action: 'A or B?', text: 'A or B?' }, 'question')
+  await localCall(directory, 'POST', '/requests', { requestId: 'paseo-2', threadId: request.threadId, text: 'A' }); await runtime.idle()
+  const input = runtime.store.tickets.get(ticket.id)!.inputs.at(-1)!
+  if (input.kind === 'trigger') expect(input.readAt).toBeNull()
+  const result = await call('paseo-1', 'orchestrator_report', { state: 'ready', summary: 'A done', human_action: null }, 'done')
+  await runtime.idle()
+  expect(result).toMatchObject({ reported: true })
+  expect(runtime.store.tickets.get(ticket.id)!.ended?.outcome).toBe('completed')
+  await expect(call('paseo-1', 'orchestrator_report', { state: 'ready', summary: 'A done', human_action: null }, 'done')).resolves.toEqual(result)
+  await expect(call('paseo-1', 'orchestrator_report', { state: 'progress', summary: 'stale' }, 'late')).rejects.toThrow('no longer current')
+  await expect(call('paseo-1', 'orchestrator_report', { state: 'ready', summary: 'different' }, 'done')).rejects.toThrow('identity conflict')
+  await call('paseo-0', 'orchestrator_reply', { ticket_id: ticket.id, purpose: 'result', text: 'A done' }, 'result')
+  const replies = await localCall(directory, 'GET', '/threads/paseo-thread')
+  expect(replies).toMatchObject({ messages: [{ text: 'Choosing option' }, { text: 'A or B?' }, { text: 'A done' }] })
+  await (await restart(machine, { feishu: null })).ready
+  expect(adapter.create).toHaveBeenCalledTimes(2)
+  expect(runtime.store.tickets.get(ticket.id)!.assignments.at(-1)!.id).toBe(assignment.id)
+  await expect(localCall(directory, 'POST', '/requests', request)).resolves.toEqual({ result: 'duplicate' })
+  await expect(localCall(directory, 'GET', '/threads/paseo-thread')).resolves.toEqual(replies)
 })
 beforeEach(async () => {
   directory = mkdtempSync(join(tmpdir(), 'orchestrator-runtime-'))

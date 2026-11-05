@@ -33,4 +33,4 @@
 
 已把 `mainTools` 的 Agent 入参改为会话 ID 和可选图片读取回调；`MasterAssessor` 的文本读取不再需要构造 DSH Agent，缺失图片能力明确拒绝。`ResourceHost` 的 transcript/modelCatalog 改为窄回调，DSH 在 Runtime 中供应实现。transcript 投影保留原事件下标，保证既有 message 资源链接不变。
 
-这些改动不改变工具名称、参数、Engine 调用或完成规则。会话创建/投递/生命周期端口和 Paseo 接线仍待实施；工具桥不能据此宣称已经可用。
+这些改动不改变工具名称、参数、Engine 调用或完成规则。随后已完成 `src/paseo/sessions.ts`、`src/paseo/bridge.ts`、`src/paseo/mcp.ts` 与 `src/paseo/reports.ts` 的窄端口与本地 MCP 工具桥接线，并在独立 Paseo 验证环境跑通同一 A/B 问答闭环。

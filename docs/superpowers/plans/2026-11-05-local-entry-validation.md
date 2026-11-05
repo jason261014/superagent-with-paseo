@@ -32,8 +32,20 @@
 - 覆盖入口默认关闭、Policy 允许名单、同 ID 内容冲突、事务回滚、回复顺序/去重、重启和启动期间关闭 socket。
 - 一轮并行全量检查曾遇到既有 Feishu 子进程退出时序断言失败；单独复跑该文件 71 项通过，停止演示服务后再次全量检查通过。未修改该测试或对应实现。
 
+## Paseo 对照验证（同任务流）
+
+- 独立状态目录：`/Users/anxiaojie/.dsh/state/sa-paseo-check`，通过 `--patch /tmp/superagent-paseo-check.yml` 挂载到同一独立 profile（端口 3098），主协调者与 worker 均使用 `claude-pool/friday-deepseek-v4-flash`（mode `auto`）。
+- 本机请求入口：`local-ipc/s`；agent 工具桥入口：`agent-ipc/s`（由 `bin/superagent-mcp.mjs` 通过 stdio MCP 暴露原 `orchestrator_*` 工具，按角色与 ticket/assignment 令牌绑定）。
+- 闭环结果：
+  1. CLI 提交 `paseo-smoke-1`（线程 `paseo-smoke-thread`）。
+  2. Paseo 协调者 (`060b0ae7-ceff-4788-9593-fd470e0a47b8`) 调用 `orchestrator_route` 接单，创建 Ticket `09c5d5bd7dd3fc285b291db0d1e91e5c` 与 Assignment `41c815b64edb561cb758d58913db7a00`。
+  3. Paseo worker (`1ba5ee88-3e3d-4890-b42c-c8adb5083b5b`) 调用 `orchestrator_report` 提问 A/B，回执落库并转发协调者，协调者调用 `orchestrator_reply` 将问题写入本地 Outbox。
+  4. CLI 同线程提交 `paseo-smoke-2` 选择 A，输入投递至该 worker。
+  5. worker 在 `/Users/anxiaojie/.dsh/state/sa-paseo-check/work/paseo-smoke-result-09c5d5bd7dd3/result.txt` 写入 `paseo-smoke:A`（13 字节），读取确认后调用 `orchestrator_report(state='ready')`；官方 Engine 将 Ticket 标记为 `completed`，协调者发送最终本地回复。
+  6. 重启后再次提交 `paseo-smoke-2` 返回 `duplicate`，未新建会话或工单；`paseoStop` 完成中断请求与运行态快照落库（`request_sent: 1, observed_idle: 1, turn_stopped: 0, unknownChildren: true`），队列清空且検証进程已干净停止。
+
 ## 实际限制
 
 - 本机入口只按 OS 账户限制访问；同账户下的程序在同一信任范围内。它不证明有人手动输入，也不是 worker 隔离机制。
 - DSH setup 仍需要已配置的 GitHub 仓库和 agent CLI。
-- Paseo 协调者、执行者、报告桥、中断和恢复尚未完成接线或实测。
+- Paseo 不提供 DSH 的静默历史注入、子进程静止证明或消息队列栅栏；后台通知随下一条正式协调者消息附带，停止观测如实保留 `turn_stopped: 0` 与 `unknownChildren: true`。

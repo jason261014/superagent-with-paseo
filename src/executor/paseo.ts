@@ -2,22 +2,30 @@
 import { createHash } from 'node:crypto'
 import type { PaseoAgentCreateOptions } from '@getpaseo/client'
 import type { Effects } from '../app/effects.ts'
+import { Later } from '../app/effects.ts'
 import type { Store } from '../app/store.ts'
-import { liveTicket, type Assignment, type EngineForExecutor, type Executor, type Ticket, type TicketInput, type WorkerReport } from '../core/index.ts'
+import { liveTicket, waitsForPerson, type Assignment, type EngineForExecutor, type Executor, type Ticket, type TicketInput, type WorkerReport } from '../core/index.ts'
 import type { PaseoAdapter } from '../paseo/client.ts'
 import { PaseoOperationJournal, type Intent } from '../paseo-control/journal.ts'
+import { family } from '../kv.ts'
+const deliveryText = family<string>('paseo-worker-message:')
 
 export interface PaseoExecutorHost {
-  store: Pick<Store, 'db' | 'atomic' | 'tickets'>
+  store: Pick<Store, 'db' | 'atomic' | 'tickets' | 'get' | 'set'>
   effects: Pick<Effects, 'enqueue' | 'handle'>
   journal: PaseoOperationJournal
   paseo: Pick<PaseoAdapter, 'create' | 'send' | 'findByLabels' | 'findMessage' | 'snapshot' | 'interrupt'>
   engine: Pick<EngineForExecutor, 'assignmentStarted' | 'inputsDelivered' | 'deliveryFailed' | 'reportForAssignment'>
-  /** Must return the same frozen configuration on replay. This slice accepts only cwd, config (provider/modeId), and labels. */
+  /** Must return the same frozen configuration on replay. */
   createOptions(ticket: Ticket, assignment: Assignment): PaseoAgentCreateOptions
+  started?(ticketId: string, assignmentId: string): void
+  created?(ticket: Ticket, assignment: Assignment, agentId: string): void
+  prepareWorkspace?(ticket: Ticket): Promise<void>
+  paused?(): boolean
+  maxWorkers?(): number
   /** Deterministic, durable text; source content and permissions are supplied by the caller. */
-  initialText(ticket: Ticket, assignment: Assignment): string
-  inputText(ticket: Ticket, input: TicketInput): string
+  initialText(ticket: Ticket, assignment: Assignment): string | Promise<string>
+  inputText(ticket: Ticket, input: TicketInput): string | Promise<string>
 }
 function id(kind: string, ...parts: string[]): string {
   return `paseo-${kind}-${createHash('sha256').update(JSON.stringify(parts)).digest('hex')}`
@@ -41,8 +49,10 @@ export class PaseoExecutor implements Executor {
     const columns = host.store.db.prepare("PRAGMA table_info('paseo_stop_observation')").all()
     if (!columns.some(column => column.name === 'turn_stopped')) host.store.db.exec('ALTER TABLE paseo_stop_observation ADD COLUMN turn_stopped INTEGER NOT NULL DEFAULT 0')
     if (!columns.some(column => column.name === 'observed_idle')) host.store.db.exec('ALTER TABLE paseo_stop_observation ADD COLUMN observed_idle INTEGER NOT NULL DEFAULT 0')
-    host.effects.handle('paseoLaunch', payload => this.track(id('key', payload.ticketId, payload.assignmentId), () => this.launch(payload.ticketId, payload.assignmentId)))
-    host.effects.handle('paseoDelivery', payload => this.track(id('key', payload.ticketId, payload.assignmentId), () => this.deliverPending(payload.ticketId, payload.assignmentId)))
+    host.effects.handle('paseoLaunch', payload => this.track(id('key', payload.ticketId, payload.assignmentId), () => this.launch(payload.ticketId, payload.assignmentId)),
+      { limit: () => host.paused?.() ? 0 : 1 })
+    host.effects.handle('paseoDelivery', payload => this.track(id('key', payload.ticketId, payload.assignmentId), () => this.deliverPending(payload.ticketId, payload.assignmentId)),
+      { limit: () => host.paused?.() ? 0 : 1 })
     host.effects.handle('paseoStop', payload => this.stopQueued(payload.ticketId, payload.assignmentId))
   }
   start(ticket: Ticket, assignment: Assignment): void {
@@ -54,9 +64,8 @@ export class PaseoExecutor implements Executor {
   stop(ticket: Ticket, assignment: Assignment, reason: string): void {
     this.host.effects.enqueue('paseoStop', id('key', ticket.id, assignment.id), { ticketId: ticket.id, assignmentId: assignment.id, reason })
   }
-  /** Only exact-current, running assignments can report. Not ready for a live bridge: a report can arrive before launch marks running and needs durable buffering/replay. Final reports require versioned delivery acceptance. */
+  /** Preserve upstream completion semantics; the bridge queues reports that arrive before launch acknowledgement. */
   report(ticketId: string, assignmentId: string, report: WorkerReport): Ticket {
-    if (report.state === 'ready' || report.state === 'dropped') throw new Error('Final reports require a verified delivery flow')
     return this.host.engine.reportForAssignment(ticketId, assignmentId, report)
   }
   private async track(assignmentId: string, run: () => Promise<void>): Promise<void> {
@@ -83,10 +92,10 @@ export class PaseoExecutor implements Executor {
   }
   private async created(ticket: Ticket, assignment: Assignment): Promise<string> {
     const base = this.host.createOptions(ticket, assignment)
-    // Fail locally before recording an intent. This slice deliberately limits the SDK surface so that it can validate every accepted field.
-    if (!base || typeof base !== 'object' || Object.keys(base).some(key => !['cwd', 'config', 'labels'].includes(key)) ||
+    // Only host-built session configuration is accepted. Never accept an initial prompt here: it would race the binding.
+    if (!base || typeof base !== 'object' || Object.keys(base).some(key => !['cwd', 'config', 'labels', 'title', 'env'].includes(key)) ||
       typeof base.cwd !== 'string' || !base.cwd.startsWith('/') || base.cwd.includes('\0') ||
-      !base.config || typeof base.config !== 'object' || Object.keys(base.config).some(key => !['provider', 'modeId'].includes(key)) ||
+      !base.config || typeof base.config !== 'object' || Object.keys(base.config).some(key => !['provider', 'modeId', 'systemPrompt', 'mcpServers', 'toolPolicy'].includes(key)) ||
       typeof base.config.provider !== 'string' || !base.config.provider.trim() ||
       typeof base.config.modeId !== 'string' || !base.config.modeId.trim() ||
       (base.labels !== undefined && (!base.labels || typeof base.labels !== 'object' || Array.isArray(base.labels) ||
@@ -123,12 +132,21 @@ export class PaseoExecutor implements Executor {
   private async launch(ticketId: string, assignmentId: string): Promise<void> {
     const initial = this.current(ticketId, assignmentId, 'pending')
     if (!initial) return
-    const agentId = await this.created(initial.ticket, initial.assignment)
+    if (this.host.paused?.() || this.activeCount() >= (this.host.maxWorkers?.() ?? Infinity)) throw new Later('Paseo worker slots are occupied')
+    await this.host.prepareWorkspace?.(initial.ticket)
     if (!this.current(ticketId, assignmentId, 'pending')) return
-    const text = this.host.initialText(initial.ticket, initial.assignment)
+    const agentId = await this.created(initial.ticket, initial.assignment)
+    this.host.created?.(initial.ticket, initial.assignment, agentId)
+    if (!this.current(ticketId, assignmentId, 'pending')) return
+    const text = await this.frozen(id('initial', ticketId, assignmentId), () => this.host.initialText(initial.ticket, initial.assignment))
+    if (!this.current(ticketId, assignmentId, 'pending')) return
+    if (this.host.paused?.()) throw new Later('Paseo launch is paused')
     await this.send(ticketId, assignmentId, agentId, id('initial', ticketId, assignmentId), text)
     this.host.store.atomic(() => {
-      if (this.current(ticketId, assignmentId, 'pending')) this.host.engine.assignmentStarted(ticketId, assignmentId)
+      if (this.current(ticketId, assignmentId, 'pending')) {
+        this.host.engine.assignmentStarted(ticketId, assignmentId)
+        this.host.started?.(ticketId, assignmentId)
+      }
     })
   }
   private async deliverPending(ticketId: string, assignmentId: string): Promise<void> {
@@ -140,8 +158,14 @@ export class PaseoExecutor implements Executor {
       if (!current || !inputId) return
       const input = current.ticket.inputs.find(item => item.id === inputId)
       if (!input) throw new Error('Pending input missing')
-      try { await this.send(ticketId, assignmentId, created.resultId, id('input', ticketId, assignmentId, inputId), this.host.inputText(current.ticket, input)) }
+      try {
+        const text = await this.frozen(id('input', ticketId, assignmentId, inputId), () => this.host.inputText(current.ticket, input))
+        if (!this.current(ticketId, assignmentId, 'running')) return
+        if (this.host.paused?.()) throw new Later('Paseo input delivery is paused')
+        await this.send(ticketId, assignmentId, created.resultId, id('input', ticketId, assignmentId, inputId), text)
+      }
       catch (error) {
+        if (error instanceof Later) throw error
         this.host.store.atomic(() => { if (this.current(ticketId, assignmentId, 'running')) this.host.engine.deliveryFailed(ticketId, assignmentId, String(error)) })
         throw error
       }
@@ -149,6 +173,31 @@ export class PaseoExecutor implements Executor {
         const fresh = this.current(ticketId, assignmentId, 'running')
         if (fresh?.ticket.undelivered.includes(inputId)) this.host.engine.inputsDelivered(ticketId, assignmentId, [inputId])
       })
+    }
+  }
+  private async frozen(messageId: string, render: () => string | Promise<string>): Promise<string> {
+    const saved = this.host.store.get(deliveryText(messageId))
+    if (saved !== undefined) return saved
+    const text = await render()
+    this.host.store.set(deliveryText(messageId), text)
+    return text
+  }
+  /** Conservative admission: idle alone does not release a running assignment's slot. */
+  activeCount(): number {
+    return this.host.store.tickets.open().filter(ticket => ticket.assignments.at(-1)?.state === 'running' && !ticket.attention && !waitsForPerson(ticket)).length
+  }
+  install(): void {}
+  dispose(): void {}
+  async shutdown(): Promise<void> { await Promise.allSettled([...this.inflight.values()].flatMap(tasks => [...tasks])) }
+  resume(): void {
+    for (const ticket of this.host.store.tickets.open()) {
+      const assignment = ticket.assignments.at(-1)
+      if (!assignment) continue
+      if (assignment.state === 'pending') this.start(ticket, assignment)
+      if (assignment.state === 'running') {
+        this.host.started?.(ticket.id, assignment.id)
+        if (ticket.undelivered.length) this.deliver(ticket, assignment)
+      }
     }
   }
   private async stopQueued(ticketId: string, assignmentId: string): Promise<void> {
@@ -183,6 +232,8 @@ export class PaseoExecutor implements Executor {
       VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(ticket_id, assignment_id) DO UPDATE SET agent_id=excluded.agent_id,
       request_sent=excluded.request_sent, runtime=excluded.runtime, turn_stopped=excluded.turn_stopped, observed_idle=excluded.observed_idle`).run(ticketId, assignmentId, agentId,
         requestSent === true ? 1 : null, JSON.stringify(observed), stopped ? 1 : 0, idle ? 1 : 0)
-    if (!stopped) return unsettled(hasSends ? 'no backend fence for prior sends' : 'stop is not yet observed')
+    // This effect requests interruption and records the observation, not a queue fence. A missing capability
+    // does not become available by retrying forever, and must not turn a successful ready report into an error.
+    if (requestSent !== true) return unsettled('interrupt request not acknowledged; stop observation retained')
   }
 }

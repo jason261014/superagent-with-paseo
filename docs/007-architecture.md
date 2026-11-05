@@ -290,10 +290,14 @@ Some generic modules still refer directly to GitHub or Feishu:
 
 | Path | Responsibility |
 | --- | --- |
-| `src/paseo/client.ts` | Paseo public session adapter; it is not yet installed in the Runtime |
-| `src/paseo-control/journal.ts` | SQLite-backed Paseo operation identities and reconciliation; it is not a running executor |
+| `src/paseo/client.ts` | Paseo public session adapter for opt-in coordinator and worker sessions |
+| `src/paseo/bridge.ts` | Owner-only role-bound MCP tool bridge that exposes original coordinator/worker tools to Paseo |
+| `src/paseo/mcp.ts` | Paseo stdio MCP entrypoint forwarding calls to the private tool bridge |
+| `src/paseo/reports.ts` | Durable assignment-bound report receipts and early-report replay |
+| `src/paseo/sessions.ts` | Narrow Paseo session creation, prompt delivery and lifecycle port |
+| `src/paseo-control/journal.ts` | SQLite-backed Paseo operation identities and uncertain-result reconciliation |
 | `src/delivery/snapshot.ts` | Private selected-file snapshots and content verification; not wired to ticket acceptance |
-| `src/executor/paseo.ts` | Optional Paseo Executor foundation; not installed in the Runtime |
+| `src/executor/paseo.ts` | Opt-in Paseo Executor preserving upstream assignment and completion semantics |
 | `src/sources/local.ts` | Default-closed local Source/Channel, atomic replay checks and ordered persistent replies through the official Outbox |
 | `src/local/transport.ts` | Opt-in owner-only Unix socket, lifecycle and bounded request client for the official Runtime |
 | `src/local/cli.ts` | Submit explicit local requests and read status/replies without starting a host |

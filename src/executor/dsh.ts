@@ -40,7 +40,7 @@ const fromPerson = (input?: TicketInput): boolean => input?.kind === 'trigger' ?
  * Internal error thrown when a ticket's workspace prepare command fails during launch.
  * DshExecutor catches it to mark the ticket failed immediately rather than retrying automatically, because an existing directory counts as prepared and an automatic retry would treat whatever a failed prepare command left behind in the directory as a prepared workspace.
  */
-class PrepareFailed extends Error {}
+export class PrepareFailed extends Error {}
 const PASSING = new RegExp(['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EAI_AGAIN', 'ENOTFOUND', 'EPIPE', 'UND_ERR', 'socket hang up', 'fetch failed',
   'network error', 'overloaded', 'rate limit', '\\b(?:408|429|50[0-4])\\b'].join('|'), 'i')
 /**
@@ -204,6 +204,24 @@ export class WorkerSlots {
  * `agent/inbox/claimed`, `session/event` and `agent/error` events on the Cordis context, and reports status transitions back to Engine.
  * Runtime, Engine, worker tools, and management routes use this class to prepare, launch, deliver to, stop, and resume ticket assignments.
  */
+export async function prepareWorkerDirectory(host: Pick<ExecutorHost, 'store' | 'environment' | 'lifetime' | 'context'>, ticket: Ticket): Promise<void> {
+  const directory = ticket.execution?.directory ?? ''
+  await mkdir(dirname(directory), { recursive: true })
+  const command = host.store.settings().executor.prepare.trim()
+  const env = Object.fromEntries(host.environment(ticket).map(variable => [variable.key, variable.value]))
+  // Enforce a timeout so a hung prepare command (such as on a credential prompt) fails the ticket instead of holding a worker slot indefinitely.
+  const signal = AbortSignal.any([host.lifetime, AbortSignal.timeout(PREPARE_TIMEOUT_MS)])
+  if (command) await runAsWorker(host.context.subprocess, ['sh', '-c', command], dirname(directory), signal, env)
+    .catch(async (error: unknown) => {
+      // Remove an empty directory left by a failed prepare command so a later retry does not treat it as already prepared.
+      await rmdir(directory).catch(() => { /* Absent, or holding what the command wrote, which the output explains. */ })
+      throw new PrepareFailed(`The prepare command failed: ${error instanceof Error ? error.message : String(error)}`)
+    })
+  await mkdir(directory, { recursive: true })
+  await verifyDirectory(directory, host.context.subprocess, host.lifetime)
+}
+
+/** Executes assignments in the official DSH runtime with durable launches and input delivery. */
 export class DshExecutor implements Executor {
   private readonly disposers: (() => void)[] = []
   private readonly slots: WorkerSlots
@@ -244,22 +262,7 @@ export class DshExecutor implements Executor {
    * A failed prepare command throws `PrepareFailed`, which is not retried automatically; an empty directory it left is removed, a non-empty one kept.
    * @throws PrepareFailed with the command's output when the prepare command fails.
    */
-  private async prepareDirectory(ticket: Ticket): Promise<void> {
-    const directory = ticket.execution?.directory ?? ''
-    await mkdir(dirname(directory), { recursive: true })
-    const command = this.host.store.settings().executor.prepare.trim()
-    const env = Object.fromEntries(this.host.environment(ticket).map(variable => [variable.key, variable.value]))
-    // Enforce a timeout so a hung prepare command (such as on a credential prompt) fails the ticket instead of holding a worker slot indefinitely.
-    const signal = AbortSignal.any([this.host.lifetime, AbortSignal.timeout(PREPARE_TIMEOUT_MS)])
-    if (command) await runAsWorker(this.host.context.subprocess, ['sh', '-c', command], dirname(directory), signal, env)
-      .catch(async (error: unknown) => {
-        // Remove an empty directory left by a failed prepare command so a later retry does not treat it as already prepared.
-        await rmdir(directory).catch(() => { /* Absent, or holding what the command wrote, which the output explains. */ })
-        throw new PrepareFailed(`The prepare command failed: ${error instanceof Error ? error.message : String(error)}`)
-      })
-    await mkdir(directory, { recursive: true })
-    await verifyDirectory(directory, this.host.context.subprocess, this.host.lifetime)
-  }
+  private async prepareDirectory(ticket: Ticket): Promise<void> { await prepareWorkerDirectory(this.host, ticket) }
   /** Enqueues a `launch` effect for an accepted or resumed assignment; launches start in queue order as worker slots free up. */
   start(ticket: Ticket, assignment: Assignment): void {
     this.host.effects.enqueue('launch', assignment.id, { ticketId: ticket.id, assignmentId: assignment.id })
