@@ -42,4 +42,4 @@
 
 ## 本轮记录
 
-2026-11-05：第 1、2 步已完成，含独立 DSH profile 的真实 A/B 问答、文件产出、ready 完成及重启去重。见 [验证记录](2026-11-05-local-entry-validation.md)。第 3 步已完成 [依赖盘点](2026-11-05-session-adaptation-audit.md)，尚未提取端口；Paseo 未接线。当前 `pnpm check` 通过 1246 项测试、类型检查和构建。
+2026-11-05：第 1、2 步已完成，含独立 DSH profile 的真实 A/B 问答、文件产出、ready 完成及重启去重。见 [验证记录](2026-11-05-local-entry-validation.md)。第 3 步已完成 [依赖盘点与首批工具/资源端口提取](2026-11-05-session-adaptation-audit.md)，会话创建/投递/生命周期端口仍待实施；Paseo 未接线。第 1、2 步的 `pnpm check` 通过 1246 项测试、类型检查和构建。

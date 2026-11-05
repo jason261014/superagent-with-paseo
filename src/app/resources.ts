@@ -1,5 +1,4 @@
 /** Serves paginated context resources to orchestrator_read so large bodies stay out of model prompts until requested. */
-import type { SessionId } from '@deepseek-ai/dsh-session'
 import { UserError, key, latestReport, reached, runningAssignment, threadKey, type Ticket, type Trigger } from '../core/index.ts'
 import { batchOf, inputMessage, triggerMessage, workerSessionId } from '../executor/dsh.ts'
 import { readGithub } from '../sources/github-read.ts'
@@ -9,7 +8,7 @@ import { feishuTriggerId } from '../sources/feishu-trigger.ts'
 import { ASSIGNMENTS, INPUTS, assignmentLine, decisionCard, decisionDetails, inputLine, newestPage, preview, textPage, threadCard, ticketCard,
   ticketDetails, triggerCard, type TicketThread } from './cards.ts'
 import { threadTitle } from './views/records.ts'
-import { transcriptEntry } from './context.ts'
+import type { transcriptEntry } from './context.ts'
 import { builtInParts, defaultPrompts } from './prompts.ts'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Commands } from '../infra/commands.ts'
@@ -62,7 +61,9 @@ export interface ResourceHost {
   readonly prompts: Pick<Prompts, 'current' | 'version' | 'history' | 'skills' | 'defaultChanged'>
   readonly commands: Commands
   readonly masterId: string
-  readonly context: Context
+  /** Projected transcript entries, retaining original indices for message resource links. */
+  transcript(sessionId: string): Promise<ReturnType<typeof transcriptEntry>[]>
+  modelCatalog(): ReturnType<Context['sessionController']['modelCatalog']>
   promptVersion(sessionId: string): PromptVersion
   /** Whether a Session may read `revision` (the revision it currently runs under or any revision it ran under previously). */
   mayRead(sessionId: string, revision: number): boolean
@@ -112,7 +113,7 @@ const THREAD_DECISIONS = 5
 const triggerLine = (trigger: Trigger) => ({ trigger_id: trigger.id, actor: trigger.actor.id, human: trigger.human, at: trigger.at,
   preview: preview(trigger.text), chars: trigger.text.length, read: `trigger/${trigger.id}` })
 async function transcript(host: ResourceHost, ticketId: string) {
-  return (await host.context.sessionController.inspect(workerSessionId(ticketId) as SessionId)).events
+  return host.transcript(workerSessionId(ticketId))
 }
 
 const ROUTES: readonly Route[] = [
@@ -189,13 +190,13 @@ const ROUTES: readonly Route[] = [
     return text(read, body)
   }],
   ['models', async read => {
-    const host = main(read), catalog = await host.context.sessionController.modelCatalog(), settings = host.store.settings()
+    const host = main(read), catalog = await host.modelCatalog(), settings = host.store.settings()
     const roles = { orchestrator: settings.eval.model, worker: settings.executor.model }
     return { default: catalog.default, roles, failures: catalog.failures,
       providers: catalog.groups.map(group => ({ id: group.id, name: group.name, count: group.models.length, read: `models/${group.id}` })) }
   }],
   ['models/', async read => {
-    const models = (await main(read).context.sessionController.modelCatalog()).groups.find(group => group.id === read.rest)?.models
+    const models = (await main(read).modelCatalog()).groups.find(group => group.id === read.rest)?.models
     if (!models) throw new Error('Unknown model provider')
     return list(read, (offset, count) => models.slice(offset, offset + count))
   }],
@@ -269,8 +270,7 @@ const ROUTES: readonly Route[] = [
       if (message === undefined) throw new Error('Unknown ticket input')
       body = message
     } else if (section === 'message' && part && /^\d+$/.test(part)) {
-      const event = (await transcript(host, id))[Number(part)]
-      const entry = event && transcriptEntry(event)
+      const entry = (await transcript(host, id))[Number(part)]
       if (!entry) throw new Error('Unknown transcript entry')
       body = JSON.stringify(entry)
     } else if (section === 'report' && part) {
@@ -281,8 +281,7 @@ const ROUTES: readonly Route[] = [
     else if (section === 'assignment') body = ticket.execution?.assignment ?? ''
     else if (section === 'result') body = latestReport(ticket)?.summary ?? ''
     else if (section === 'transcript') {
-      body = (await transcript(host, id)).flatMap((event, index) => {
-        const entry = transcriptEntry(event)
+      body = (await transcript(host, id)).flatMap((entry, index) => {
         const said = entry?.message.content.map(block => block.type === 'text' ? block.text : `[${block.type}]`).join(' ') ?? ''
         return entry ? [{ type: entry.type, preview: preview(said).slice(0, 80), chars: JSON.stringify(entry).length,
           read: `ticket/${id}/message/${index}` }] : []

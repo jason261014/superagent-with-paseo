@@ -29,4 +29,8 @@
 2. 接 Paseo 协调者的候选输入、原路由工具和本地回复，再接 worker 创建、原报告工具和追问。操作员 socket 与 agent 工具桥保持不同入口；后者只允许绑定角色/任务操作。
 3. 复用同一 A/B 演练任务对照结果，补重启、早到报告和中断观测。缺失的 inbox、静默通知、消费见证和后台 job 能力逐项标明；不以修改 Engine 完成语义消除差异。
 
-本文件只是已完成的代码盘点；端口提取和 Paseo 接线尚未实施。
+## 首批提取进度
+
+已把 `mainTools` 的 Agent 入参改为会话 ID 和可选图片读取回调；`MasterAssessor` 的文本读取不再需要构造 DSH Agent，缺失图片能力明确拒绝。`ResourceHost` 的 transcript/modelCatalog 改为窄回调，DSH 在 Runtime 中供应实现。transcript 投影保留原事件下标，保证既有 message 资源链接不变。
+
+这些改动不改变工具名称、参数、Engine 调用或完成规则。会话创建/投递/生命周期端口和 Paseo 接线仍待实施；工具桥不能据此宣称已经可用。
