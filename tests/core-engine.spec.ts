@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { Engine, MemoryRepositories, UserError, followupOwners, key, runningAssignment, ticketOutcome, ticketStage,
   waitsForPerson } from '../src/core/index.ts'
-import type { Assessor, Assignment, Candidate, EngineOptions, Executor, OutboundMessage, Outcome, Policy, Ticket, Trigger } from '../src/core/index.ts'
+import type { Assessor, Assignment, Candidate, EngineOptions, Executor, OutboundMessage, Outcome, Policy, Repositories, Ticket, Trigger } from '../src/core/index.ts'
 
 const member = { source: 'chat', id: 'alice' }
 const guest = { source: 'chat', id: 'guest' }
@@ -11,9 +11,9 @@ function trigger(id: string, overrides: Partial<Trigger> = {}): Trigger {
 interface Hooks {
   emit?: (event: { type: string; data: Record<string, unknown> }) => void
   prepareTicket?: EngineOptions['prepareTicket']
+  repo?: Repositories
 }
-function harness(policyOverrides: Partial<Policy> = {}, { emit, prepareTicket }: Hooks = {}) {
-  const repo = new MemoryRepositories()
+function harness(policyOverrides: Partial<Policy> = {}, { emit, prepareTicket, repo = new MemoryRepositories() }: Hooks = {}) {
   const outbox: OutboundMessage[] = []
   const withdrawn: string[] = []
   const requests: Candidate[] = []
@@ -1618,4 +1618,78 @@ describe('ignores from the card', () => {
     h.engine.receive(trigger('5', { actor: guest })); h.engine.reevaluate('5'); h.pump()
     expect(() => h.engine.decide('5', { kind: 'accept', title: 'Fix', scope: 'small', reason: 'chat' })).toThrow(new UserError('notExplicit'))
   })
+})
+
+describe('assignment-bound worker reports', () => {
+  it('rejects late reports before any ticket, outbox, attention, or executor effect can change', () => {
+    const emit = vi.fn()
+    const h = harness({}, { emit })
+    const ticketId = accepted(h).ticketId!
+    const old = h.repo.tickets.get(ticketId)!.assignments.at(-1)!.id
+    h.engine.reportForAssignment(ticketId, old, { state: 'failed', summary: 'needs retry' })
+    h.tick(1)
+    const retried = h.engine.retryTicket(ticketId)
+    const current = retried.assignments.at(-1)!.id
+    expect(current).not.toBe(old)
+    const before = structuredClone(h.repo.tickets.get(ticketId))
+    const outboxBefore = structuredClone(h.outbox)
+    const withdrawnBefore = [...h.withdrawn]
+    const emissionsBefore = emit.mock.calls.length
+    const stopBefore = vi.mocked(h.executor.stop).mock.calls.length
+    // The replacement is pending; neither assignment may report until the new one starts.
+    expect(() => h.engine.reportForAssignment(ticketId, old, { state: 'ready', summary: 'late success' })).toThrow(new UserError('assignmentNotCurrent'))
+    expect(() => h.engine.reportForAssignment(ticketId, current, { state: 'progress', summary: 'early' })).toThrow(new UserError('assignmentNotCurrent'))
+    expect(h.repo.tickets.get(ticketId)).toEqual(before)
+    expect(h.outbox).toEqual(outboxBefore)
+    expect(h.withdrawn).toEqual(withdrawnBefore)
+    expect(emit).toHaveBeenCalledTimes(emissionsBefore)
+    expect(h.executor.stop).toHaveBeenCalledTimes(stopBefore)
+    h.settle()
+    const started = structuredClone(h.repo.tickets.get(ticketId))
+    const outboxStarted = structuredClone(h.outbox)
+    const eventCount = emit.mock.calls.length
+    expect(() => h.engine.reportForAssignment(ticketId, old, { state: 'progress', summary: 'late question', question: 'Old question?' })).toThrow(new UserError('assignmentNotCurrent'))
+    expect(h.repo.tickets.get(ticketId)).toEqual(started)
+    expect(h.outbox).toEqual(outboxStarted)
+    expect(h.withdrawn).toEqual(withdrawnBefore)
+    expect(emit).toHaveBeenCalledTimes(eventCount)
+    expect(h.engine.reportForAssignment(ticketId, current, { state: 'progress', summary: 'working' }).assignments.at(-1)?.report?.summary).toBe('working')
+    // The existing DSH API remains available with its original semantics.
+    expect(h.engine.report(ticketId, { state: 'progress', summary: 'legacy report' }).assignments.at(-1)?.report?.summary).toBe('legacy report')
+  })
+
+  it('rejects reports for unknown tickets and for tickets already ended', () => {
+    const h = harness()
+    const ticketId = accepted(h).ticketId!
+    const current = h.repo.tickets.get(ticketId)!.assignments.at(-1)!.id
+    expect(() => h.engine.reportForAssignment('missing', current, { state: 'progress', summary: 'x' })).toThrow(new UserError('unknownTicket'))
+    h.engine.stopTicket(ticketId)
+    const before = structuredClone(h.repo.tickets.get(ticketId))
+    expect(() => h.engine.reportForAssignment(ticketId, current, { state: 'progress', summary: 'late' })).toThrow(new UserError('assignmentNotCurrent'))
+    expect(h.repo.tickets.get(ticketId)).toEqual(before)
+  })
+})
+
+it('uses the real SQLite repository transaction for identity checks and report writes', async () => {
+  const { mkdtempSync, rmSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const { Store } = await import('../src/app/store.ts')
+  const directory = mkdtempSync(join(tmpdir(), 'engine-assignment-report-'))
+  const store = new Store(join(directory, 'state.sqlite'))
+  try {
+    const h = harness({}, { repo: store })
+    const ticketId = accepted(h).ticketId!
+    const old = store.tickets.get(ticketId)!.assignments.at(-1)!.id
+    expect(() => store.atomic(() => {
+      h.engine.reportForAssignment(ticketId, old, { state: 'progress', summary: 'rolled back' })
+      throw new Error('abort outer transaction')
+    })).toThrow('abort outer transaction')
+    expect(store.tickets.get(ticketId)!.assignments.at(-1)!.report).toBeUndefined()
+    h.engine.reportForAssignment(ticketId, old, { state: 'failed', summary: 'failed' })
+    h.tick(1); h.engine.retryTicket(ticketId); h.settle()
+    const before = structuredClone(store.tickets.get(ticketId))
+    expect(() => h.engine.reportForAssignment(ticketId, old, { state: 'ready', summary: 'late' })).toThrow(new UserError('assignmentNotCurrent'))
+    expect(store.tickets.get(ticketId)).toEqual(before)
+  } finally { store.close(); rmSync(directory, { recursive: true, force: true }) }
 })

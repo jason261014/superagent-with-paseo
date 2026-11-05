@@ -13,6 +13,10 @@ export interface EffectPayloads {
   assessment: { triggerId: string }
   /** Launch a pending Assignment; the key is the Assignment ID. */
   launch: { ticketId: string; assignmentId: string }
+  /** Paseo effects are separate from the DSH executor's handlers. */
+  paseoLaunch: { ticketId: string; assignmentId: string }
+  paseoDelivery: { ticketId: string; assignmentId: string }
+  paseoStop: { ticketId: string; assignmentId: string; reason: string }
   /** Hand a ticket's waiting Inputs to its running Assignment; the key is the Ticket ID. */
   delivery: { ticketId: string }
   /** Steer a report or a candidate into the main Session; the key is the request ID. */
