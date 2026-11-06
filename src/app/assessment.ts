@@ -1,5 +1,4 @@
 /** Proactive candidate assessment for the main Session: relays candidate cards, serves bounded context reads, and records outcomes. */
-import type { Agent } from '@deepseek-ai/dsh-agent'
 import { z } from 'zod'
 import { reasonText, threadKey, type Assessor, type AssessmentOutcome, type Candidate, type EngineForMainSession,
   type Trigger } from '../core/index.ts'
@@ -80,6 +79,9 @@ export const EvalReadSchema = z.object({
 })
 /** Validated arguments for `MasterAssessor.read`. */
 export type EvalRead = z.infer<typeof EvalReadSchema>
+/** Optional session attachment capability. Text assessment does not require a DSH Agent. */
+export type AssessmentImageReader = (source: TriggerContext, commands: Commands, message: { id: string; text: string },
+  key: string, signal: AbortSignal) => Promise<unknown>
 
 /**
  * Implements the `Engine` `Assessor` port for proactive candidate evaluation in the main Session.
@@ -220,9 +222,9 @@ export class MasterAssessor implements Assessor {
   }
   /**
    * Serves bounded paginated text or image attachments from the evaluation's thread context or repository for
-   * `orchestrator_eval_read`; `agent` is the main Session, which receives images as attachments.
+   * `orchestrator_eval_read`; the session adapter supplies image attachment support when available.
    */
-  async read(agent: Agent, read: EvalRead, signal: AbortSignal) {
+  async read(read: EvalRead, signal: AbortSignal, readImage?: AssessmentImageReader) {
       const { candidate, trigger } = this.evalFor(read.trigger_id)
       await this.seed(candidate.evalId, trigger, signal)
       const { cache } = this.reads(candidate.evalId, trigger)
@@ -235,7 +237,8 @@ export class MasterAssessor implements Assessor {
         const source = this.host.threadContext(trigger)
         if (!source) throw new Error(NO_CONTEXT)
         const key = read.image_id!.slice(read.image_id!.indexOf('/') + 1)
-        return source.image(agent, commands, image, key, this.host.deployment.stateDir, signal)
+        if (!readImage) throw new Error('This session does not support source image attachments')
+        return readImage(source, commands, image, key, signal)
       }
       const cacheKey = JSON.stringify([read.resource, read.path, read.cursor, read.message_id])
       if (read.offset > 0) {

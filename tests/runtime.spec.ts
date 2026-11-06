@@ -8,6 +8,13 @@ import { afterEach, beforeEach, describe, expect, expectTypeOf, it, vi } from 'v
 import type { UserMessage } from '@deepseek-ai/dsh-llm'
 import { renderPrompt } from '@deepseek-ai/dsh-system-prompt'
 import { Runtime } from '../src/app/runtime.ts'
+import { localCall, localSocketPath } from '../src/local/transport.ts'
+import { privateCall } from '../src/local/transport.ts'
+import { bridgeSocketPath } from '../src/paseo/bridge.ts'
+import * as paseoClient from '../src/paseo/client.ts'
+import type { PaseoAgentCreateOptions } from '@getpaseo/client'
+import { localTrigger } from '../src/sources/local.ts'
+import { existsSync } from 'node:fs'
 import { jobRegistry } from './fixtures/host.ts'
 import { evalsHealth } from '../src/app/views/overview.ts'
 import { mandateInstructions } from '../src/executor/dsh.ts'
@@ -134,6 +141,129 @@ async function acceptedTicket(trigger = feishu('1', '@bot 修一下回归')) {
   const ticket = runtime.store.tickets.get((result.ticket as { ticket_id: string }).ticket_id)!
   return { trigger, ticket, sessionId: `worker-${ticket.id}` }
 }
+it('closes a local socket even when stop races its startup', async () => {
+  await restart({ localRequests: true })
+  await runtime.stop()
+  await runtime.ready
+  expect(existsSync(localSocketPath(directory))).toBe(false)
+})
+it('runs local IPC through the official coordinator tools, DSH worker and persisted Outbox', async () => {
+  expect(existsSync(localSocketPath(directory))).toBe(false)
+  await (await restart({ localRequests: true }, { feishu: null })).ready
+  await expect(localCall(directory, 'GET', '/status')).resolves.toMatchObject({ configured: true, accepting: false })
+  const input = { requestId: 'local-1', threadId: 'local-conversation', text: 'Investigate the regression' }
+  await expect(localCall(directory, 'POST', '/requests', input)).rejects.toThrow('LOCAL_SOURCE_DISABLED')
+  const settings = runtime.store.settings()
+  runtime.store.saveSettings({ ...settings,
+    sources: { ...settings.sources, local: { enabled: true, config: { acceptRequests: true } } },
+    policy: { ...settings.policy, sources: { ...settings.policy.sources, local: { allowed: [{ id: `uid:${process.getuid!()}` }] } } },
+  })
+  await expect(localCall(directory, 'POST', '/requests', input)).resolves.toEqual({ result: 'stored' })
+  await runtime.idle()
+  const trigger = localTrigger(input)
+  expect(relays(runtime.masterId).some(item => item.trigger_id === trigger.id)).toBe(true)
+  const result = await route({ kind: 'accept', trigger_id: trigger.id, title: 'Investigate',
+    worktree_name: 'local-regression', acknowledgement: 'Working on it' })
+  const ticketId = (result.ticket as { ticket_id: string }).ticket_id, sessionId = `worker-${ticketId}`
+  expect(runtime.store.tickets.get(ticketId)!.assignments.at(-1)!.state).toBe('running')
+  expect(relays(sessionId)[0]).toMatchObject({ ticket_id: ticketId, trigger: { text: input.text } })
+  await runTool(sessionId, 'orchestrator_report', { state: 'progress', summary: 'Need a choice', human_action: 'Which option?' })
+  await runTool(runtime.masterId, 'orchestrator_reply', { ticket_id: ticketId, purpose: 'attention', human_action: 'Which option?', text: 'Which option?' })
+  const followup = { requestId: 'local-2', threadId: input.threadId, text: 'Option A' }
+  await localCall(directory, 'POST', '/requests', followup); await runtime.idle()
+  expect(runtime.store.triggers.disposition(localTrigger(followup).id)?.fanout).toContain(ticketId)
+  await runTool(sessionId, 'orchestrator_report', { state: 'ready', summary: 'Implemented A', human_action: null })
+  expect(runtime.store.tickets.get(ticketId)!.ended?.outcome).toBe('completed')
+  await runTool(runtime.masterId, 'orchestrator_reply', { ticket_id: ticketId, purpose: 'result', text: 'Implemented A' })
+  const replies = await localCall(directory, 'GET', `/threads/${input.threadId}`)
+  expect(replies).toMatchObject({ messages: [{ text: 'Working on it' }, { text: 'Which option?' }, { text: 'Implemented A' }] })
+  await expect(localCall(directory, 'POST', '/requests', input)).resolves.toEqual({ result: 'duplicate' })
+  await expect(localCall(directory, 'POST', '/requests', { ...input, text: 'Changed' })).rejects.toThrow('LOCAL_REQUEST_CONFLICT')
+  await (await restart({ localRequests: true }, { feishu: null })).ready
+  await expect(localCall(directory, 'GET', `/threads/${input.threadId}`)).resolves.toEqual(replies)
+  await expect(localCall(directory, 'POST', '/requests', input)).resolves.toEqual({ result: 'duplicate' })
+  await runtime.stop()
+  expect(existsSync(localSocketPath(directory))).toBe(false)
+})
+it('runs original coordinator/worker tools over the Paseo bridge, buffers early reports and restores bindings', async () => {
+  const created = new Map<string, PaseoAgentCreateOptions>(), sent = new Map<string, string>()
+  let early: unknown
+  const call = async (agentId: string, name: string, args: unknown, requestId = name) => {
+    const config = created.get(agentId)!.config.mcpServers!.superagent!
+    if (config.type !== 'stdio') throw new Error('Expected stdio')
+    return privateCall(bridgeSocketPath(directory), 'POST', '/call', { requestId, name, arguments: args }, config.env!.SUPERAGENT_TOOL_TOKEN)
+  }
+  const adapter: paseoClient.PaseoAdapter = {
+    create: vi.fn(async options => { const agentId = 'paseo-' + created.size; created.set(agentId, options); return { agentId, cwd: options.cwd } }),
+    send: vi.fn(async (id, text, messageId) => {
+      sent.set(messageId, text)
+      if (created.get(id)?.labels?.superagentAssignment && !early) early = await call(id, 'orchestrator_report',
+        { state: 'progress', summary: 'Need choice', human_action: 'A or B?' }, 'early-question')
+    }),
+    findByLabels: vi.fn(async () => ({ kind: 'unknown' as const, matches: [], reason: 'not needed' })),
+    findMessage: vi.fn(async (_id, messageId) => sent.has(messageId) ? { kind: 'present' as const, entry: {}, epoch: '1' } : { kind: 'unknown' as const, reason: 'not seen' }),
+    timeline: vi.fn(async () => ({ kind: 'complete' as const, epoch: '1', entries: [
+      { seqStart: 1, seqEnd: 3, timestamp: '2026-11-06T00:00:00Z', item: { type: 'reasoning', text: 'private reasoning' } },
+      { seqStart: 4, seqEnd: 7, timestamp: '2026-11-06T00:00:01Z', item: { type: 'assistant_message', text: 'A done' } },
+    ] })),
+    snapshot: vi.fn(async id => ({ agentId: id, cwd: created.get(id)?.cwd ?? '', status: 'idle', activeTurn: null,
+      pendingPermissions: [], observedAt: '', unknownChildren: true as const })),
+    interrupt: vi.fn(async () => ({ requestSent: true as const, runtime: null })), archive: vi.fn(async () => ({ archivedAt: '' })), close: vi.fn(async () => {}),
+  }
+  vi.spyOn(paseoClient, 'createPaseoAdapter').mockReturnValue(adapter)
+  const machine = { localRequests: true, paseo: { url: 'ws://127.0.0.1:6767/ws', orchestrator: 'codex/test', worker: 'claude-pool/test',
+    orchestratorMode: 'auto-review', workerMode: 'auto', bridgeCommand: '/test/superagent-mcp.mjs' } }
+  await (await restart(machine, { feishu: null })).ready
+  const settings = runtime.store.settings()
+  runtime.store.saveSettings({ ...settings, executor: { ...settings.executor, prepare: '' },
+    sources: { ...settings.sources, local: { enabled: true, config: { acceptRequests: true } } },
+    policy: { ...settings.policy, sources: { ...settings.policy.sources, local: { allowed: [{ id: 'uid:' + process.getuid!() }] } } } })
+  const request = { requestId: 'paseo-1', threadId: 'paseo-thread', text: 'Ask A or B then write the result' }
+  await localCall(directory, 'POST', '/requests', request); await runtime.idle()
+  const trigger = localTrigger(request)
+  await call('paseo-0', 'orchestrator_route', { decisions: [{ kind: 'accept', trigger_id: trigger.id,
+    title: 'Choose option', worktree_name: 'choose-option', acknowledgement: 'Choosing option' }] })
+  await runtime.idle()
+  const ticket = runtime.store.tickets.list()[0]!, assignment = ticket.assignments.at(-1)!
+  expect(early).toMatchObject({ reported: false, queued: true })
+  expect(ticket.attention?.question).toBe('A or B?')
+  expect(ticket.assignments.at(-1)?.state).toBe('running')
+  const worker = created.get('paseo-1')!
+  const transcript = await call('paseo-0', 'orchestrator_read', { resource: `ticket/${ticket.id}/transcript` }, 'transcript') as { text: string }
+  const message = JSON.parse(transcript.text) as { read: string; preview: string }
+  expect(message.preview).toBe('A done')
+  expect(adapter.timeline).toHaveBeenCalledWith('paseo-1')
+  expect(transcript.text).not.toContain('private reasoning')
+  await expect(call('paseo-1', 'orchestrator_read', { resource: message.read }, 'message')).resolves.toMatchObject({ text: expect.stringContaining('A done') })
+  await expect(call('paseo-0', 'orchestrator_read', { resource: `ticket/${ticket.id}/message/1` }, 'unknown-message')).rejects.toThrow('Unknown transcript entry')
+  vi.mocked(adapter.timeline).mockResolvedValueOnce({ kind: 'unknown', reason: 'TIMELINE_GAP' })
+  await expect(call('paseo-0', 'orchestrator_read', { resource: `ticket/${ticket.id}/transcript` }, 'gapped-transcript')).rejects.toThrow('TIMELINE_GAP')
+  expect(worker.config.systemPrompt).toContain('dsh-superagent prompt revision')
+  expect(worker.config.systemPrompt).toContain('Paseo')
+  expect(worker.cwd).toBe(ticket.execution!.directory)
+  await expect(call('paseo-1', 'orchestrator_route', {})).rejects.toThrow('unavailable for this role')
+  await expect(call('paseo-1', 'orchestrator_read', { resource: 'settings' })).rejects.toThrow()
+  await call('paseo-0', 'orchestrator_reply', { ticket_id: ticket.id, purpose: 'attention', human_action: 'A or B?', text: 'A or B?' }, 'question')
+  await localCall(directory, 'POST', '/requests', { requestId: 'paseo-2', threadId: request.threadId, text: 'A' }); await runtime.idle()
+  const input = runtime.store.tickets.get(ticket.id)!.inputs.at(-1)!
+  if (input.kind === 'trigger') expect(input.readAt).toBeNull()
+  const result = await call('paseo-1', 'orchestrator_report', { state: 'ready', summary: 'A done', human_action: null }, 'done')
+  await runtime.idle()
+  expect(result).toMatchObject({ reported: true })
+  expect(runtime.store.tickets.get(ticket.id)!.ended?.outcome).toBe('completed')
+  await expect(call('paseo-1', 'orchestrator_report', { state: 'ready', summary: 'A done', human_action: null }, 'done')).resolves.toEqual(result)
+  await expect(call('paseo-1', 'orchestrator_report', { state: 'progress', summary: 'stale' }, 'late')).rejects.toThrow('no longer current')
+  await expect(call('paseo-1', 'orchestrator_report', { state: 'ready', summary: 'different' }, 'done')).rejects.toThrow('identity conflict')
+  await call('paseo-0', 'orchestrator_reply', { ticket_id: ticket.id, purpose: 'result', text: 'A done' }, 'result')
+  const replies = await localCall(directory, 'GET', '/threads/paseo-thread')
+  expect(replies).toMatchObject({ messages: [{ text: 'Choosing option' }, { text: 'A or B?' }, { text: 'A done' }] })
+  await (await restart(machine, { feishu: null })).ready
+  expect(adapter.create).toHaveBeenCalledTimes(2)
+  expect(runtime.store.tickets.get(ticket.id)!.assignments.at(-1)!.id).toBe(assignment.id)
+  await expect(call('paseo-0', 'orchestrator_read', { resource: message.read }, 'restored-message')).resolves.toMatchObject({ text: expect.stringContaining('A done') })
+  await expect(localCall(directory, 'POST', '/requests', request)).resolves.toEqual({ result: 'duplicate' })
+  await expect(localCall(directory, 'GET', '/threads/paseo-thread')).resolves.toEqual(replies)
+})
 beforeEach(async () => {
   directory = mkdtempSync(join(tmpdir(), 'orchestrator-runtime-'))
   vi.spyOn(Commands.prototype, 'gh').mockImplementation(async args => args[1] === 'user' ? { login: 'agent-bot' } : args[1]?.includes('/pulls/') ? { state: 'open', user: { login: 'agent-bot' }, html_url: 'https://github.com/acme/widgets/pull/' + args[1].split('/').at(-1), head: { ref: `agent/${String(runtime.store.tickets.list()[0]?.execution?.name)}`, sha: 'head-1', repo: { full_name: 'acme/widgets' } } } : { default_branch: 'master', permissions: { push: true } })

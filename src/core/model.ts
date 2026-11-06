@@ -319,6 +319,11 @@ export const liveTicket = (ticket: Pick<Ticket, 'ended'>): boolean => !ticket.en
 /** How a ticket ended. */
 export const ticketOutcome = (ticket: Pick<Ticket, 'ended'>): TicketOutcome | undefined => ticket.ended?.outcome
 export const runningAssignment = (ticket: Ticket): Assignment | undefined => ticket.assignments.find(assignment => assignment.state === 'running')
+
+/** A report can belong only to the latest assignment, and only while it is the sole running assignment. */
+export const isCurrentRunningAssignment = (ticket: Ticket, assignmentId: string): boolean =>
+  liveTicket(ticket) && ticket.assignments.at(-1)?.id === assignmentId && ticket.assignments.at(-1)?.state === 'running' &&
+  ticket.assignments.filter(assignment => assignment.state === 'running').length === 1
 /**
  * Whether a Trigger reached a ticket: it started the ticket, came to it as an Input, or is on a Thread the ticket subscribes
  * to; with `context` false, not a Thread the ticket follows only for context, where its worker may read but not write.

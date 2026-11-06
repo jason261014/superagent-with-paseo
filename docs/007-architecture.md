@@ -290,6 +290,18 @@ Some generic modules still refer directly to GitHub or Feishu:
 
 | Path | Responsibility |
 | --- | --- |
+| `src/paseo/client.ts` | Paseo public session adapter for opt-in coordinator and worker sessions |
+| `src/paseo/bridge.ts` | Owner-only role-bound MCP tool bridge that exposes original coordinator/worker tools to Paseo |
+| `src/paseo/mcp.ts` | Paseo stdio MCP entrypoint forwarding calls to the private tool bridge |
+| `src/paseo/reports.ts` | Durable assignment-bound report receipts and early-report replay |
+| `src/paseo/sessions.ts` | Narrow Paseo session creation, prompt delivery and lifecycle port |
+| `src/paseo/transcript.ts` | Public timeline projection into existing transcript resources, with agent/epoch/sequence-bound message links |
+| `src/paseo-control/journal.ts` | SQLite-backed Paseo operation identities and uncertain-result reconciliation |
+| `src/delivery/snapshot.ts` | Private selected-file snapshots and content verification; not wired to ticket acceptance |
+| `src/executor/paseo.ts` | Opt-in Paseo Executor preserving upstream assignment and completion semantics |
+| `src/sources/local.ts` | Default-closed local Source/Channel, atomic replay checks and ordered persistent replies through the official Outbox |
+| `src/local/transport.ts` | Opt-in owner-only Unix socket, lifecycle and bounded request client for the official Runtime |
+| `src/local/cli.ts` | Submit explicit local requests and read status/replies without starting a host |
 | `src/index.ts` | The main plugin entry: reads the machine settings, starts the Runtime, and gives it the restart that a save of a Source's account uses |
 | `src/deployment.ts` | The plugin `Config` and `Machine`; `resolveDeployment` and `resolveFeishuBot` read the repository and the accounts from the Source settings, each CLI run as Executor shells run it; `SETUP_FIELDS` lists the Source fields setup reads. The code names no person, account or organization |
 | `src/setup.ts` | Setup problems: `SetupError`, with a code, the place that fixes it and the English text the log, the main Session and the panel share |
@@ -403,6 +415,13 @@ Some generic modules still refer directly to GitHub or Feishu:
 
 | Test | Covers |
 | --- | --- |
+| `tests/paseo-client.spec.ts` | Paseo adapter identity, pagination and interruption boundaries |
+| `tests/paseo-transcript.spec.ts` | Paseo message/tool projection, reasoning omission, stable links and unavailable history |
+| `tests/paseo-control-journal.spec.ts` | Durable operation identity and uncertain-result reconciliation |
+| `tests/paseo-executor.spec.ts` | Paseo Executor effect and assignment boundaries |
+| `tests/paseo-local-source.spec.ts` | Local admission, replay conflicts, questions, follow-ups and original completion through Engine/Outbox |
+| `tests/local-transport.spec.ts` | Unix socket permissions, CLI behavior, request bounds and transport shutdown |
+| `tests/delivery-snapshot.spec.ts` | Selected-file snapshots and content verification |
 | `tests/core-engine.spec.ts` | Domain rules on in-memory repositories: receiving, Eval, fan-out, resume and stop, interrupted Assignments, the pause, Policy changes, reports and outcomes, attaching, replies, failed deliveries and dismissed problems |
 | `tests/stage.spec.ts` | The Ticket stages, row by row |
 | `tests/policy.spec.ts` | Source scope, the gate, the admission table, Mandate revalidation, the Policy version, settings migrations and assessment outcomes |
@@ -558,7 +577,7 @@ Ticket cards use the closed `TICKET_STATES` set from `src/app/cards.ts`: an open
 | `thread/<key>` | Label, Tickets, recent Decisions and a page of Triggers |
 | `trigger/<id>` | Message text, replied-to Trigger and neighboring messages, excluding CI runs |
 | `ticket/<id>` | Related ids, source-batch Triggers, Threads, and first pages of Assignments and Inputs |
-| Ticket subresources | `/assignments`, `/inputs`, `/assignment`, `/result`, `/report/<assignment id>`, `/transcript`, `/message/<n>`, `/input/<id>` |
+| Ticket subresources | `/assignments`, `/inputs`, `/assignment`, `/result`, `/report/<assignment id>`, `/transcript`, `/message/<entry>` (DSH index or opaque Paseo ID), `/input/<id>` |
 | `settings`, `settings/<block>` | Revisions and summaries, or a complete block ready to save |
 | `prompts`, `prompts/<revision>`, `prompts/current`, `prompts/defaults`, `prompt-preview/<id>` | Prompt configurations and composed text |
 | `models`, `models/<provider>` | Available models |
