@@ -295,6 +295,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/paseo/mcp.ts` | Paseo stdio MCP entrypoint forwarding calls to the private tool bridge |
 | `src/paseo/reports.ts` | Durable assignment-bound report receipts and early-report replay |
 | `src/paseo/sessions.ts` | Narrow Paseo session creation, prompt delivery and lifecycle port |
+| `src/paseo/transcript.ts` | Public timeline projection into existing transcript resources, with agent/epoch/sequence-bound message links |
 | `src/paseo-control/journal.ts` | SQLite-backed Paseo operation identities and uncertain-result reconciliation |
 | `src/delivery/snapshot.ts` | Private selected-file snapshots and content verification; not wired to ticket acceptance |
 | `src/executor/paseo.ts` | Opt-in Paseo Executor preserving upstream assignment and completion semantics |
@@ -415,6 +416,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | Test | Covers |
 | --- | --- |
 | `tests/paseo-client.spec.ts` | Paseo adapter identity, pagination and interruption boundaries |
+| `tests/paseo-transcript.spec.ts` | Paseo message/tool projection, reasoning omission, stable links and unavailable history |
 | `tests/paseo-control-journal.spec.ts` | Durable operation identity and uncertain-result reconciliation |
 | `tests/paseo-executor.spec.ts` | Paseo Executor effect and assignment boundaries |
 | `tests/paseo-local-source.spec.ts` | Local admission, replay conflicts, questions, follow-ups and original completion through Engine/Outbox |
@@ -575,7 +577,7 @@ Ticket cards use the closed `TICKET_STATES` set from `src/app/cards.ts`: an open
 | `thread/<key>` | Label, Tickets, recent Decisions and a page of Triggers |
 | `trigger/<id>` | Message text, replied-to Trigger and neighboring messages, excluding CI runs |
 | `ticket/<id>` | Related ids, source-batch Triggers, Threads, and first pages of Assignments and Inputs |
-| Ticket subresources | `/assignments`, `/inputs`, `/assignment`, `/result`, `/report/<assignment id>`, `/transcript`, `/message/<n>`, `/input/<id>` |
+| Ticket subresources | `/assignments`, `/inputs`, `/assignment`, `/result`, `/report/<assignment id>`, `/transcript`, `/message/<entry>` (DSH index or opaque Paseo ID), `/input/<id>` |
 | `settings`, `settings/<block>` | Revisions and summaries, or a complete block ready to save |
 | `prompts`, `prompts/<revision>`, `prompts/current`, `prompts/defaults`, `prompt-preview/<id>` | Prompt configurations and composed text |
 | `models`, `models/<provider>` | Available models |

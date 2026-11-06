@@ -49,3 +49,12 @@
 - 本机入口只按 OS 账户限制访问；同账户下的程序在同一信任范围内。它不证明有人手动输入，也不是 worker 隔离机制。
 - DSH setup 仍需要已配置的 GitHub 仓库和 agent CLI。
 - Paseo 不提供 DSH 的静默历史注入、子进程静止证明或消息队列栅栏；后台通知随下一条正式协调者消息附带，停止观测如实保留 `turn_stopped: 0` 与 `unknownChildren: true`。
+
+## Paseo transcript 补齐验证（2026-11-06，Asia/Shanghai）
+
+- 接续未提交的 timeline 读取改动，补齐 Runtime 原 `ticket/<id>/transcript` 和 message 资源接线。正文、工具输入输出、错误及压缩标记投影为可读消息；省略 reasoning 与插件 UI 项。没有修改 Engine 或 ready 完成语义。
+- 读取按页校验 epoch、reset、gap、cursor 和条目序号；历史不完整、冲突或超过 20 页时明确报错。消息链接由 agent ID、epoch 和 seqStart 绑定，流式增长不改变链接，旧链接不会指向新会话或重置后的其他内容。
+- 只读实际 Paseo worker `1ba5ee88-3e3d-4890-b42c-c8adb5083b5b`：13 条公开 timeline 事件映射为 8 条消息，其中 5 条工具调用；可读取 `paseo-smoke:A` 的写入、Read 验证和 ready 报告，重复读取一致。没有创建新模型任务。
+- `pnpm check` 通过：66 个文件、1255 项测试，类型检查与构建通过。真实 Runtime/工具桥测试覆盖 coordinator 和 worker 读取、不可用历史、错误消息 ID 及重启后读取。
+- 构建后使用已保存的 `/Users/anxiaojie/.dsh/profiles/superagent-local-check/paseo.patch.yml` 启动独立环境，CLI status 返回 configured=true、paused=false、accepting=true。经实际 agent IPC 工具桥调用 `orchestrator_read`，原 ticket transcript 返回 8 条记录；最新消息详情包含结果文件内容，两次独立请求一致，effect 表为空。
+- 验证进程随后通过 SIGINT 退出（退出码 130）；状态和成果保留。配置从 `/tmp` 移到 profile 下的独立覆盖文件，DSH 基线配置不变。启动、提交、回复、停止命令见 [本地使用指南](../../local-usage.md)。

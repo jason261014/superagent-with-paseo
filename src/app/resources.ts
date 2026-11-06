@@ -8,7 +8,7 @@ import { feishuTriggerId } from '../sources/feishu-trigger.ts'
 import { ASSIGNMENTS, INPUTS, assignmentLine, decisionCard, decisionDetails, inputLine, newestPage, preview, textPage, threadCard, ticketCard,
   ticketDetails, triggerCard, type TicketThread } from './cards.ts'
 import { threadTitle } from './views/records.ts'
-import type { transcriptEntry } from './context.ts'
+import type { TranscriptEntry } from './context.ts'
 import { builtInParts, defaultPrompts } from './prompts.ts'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Commands } from '../infra/commands.ts'
@@ -35,7 +35,7 @@ export const RESOURCES: readonly { name: string; holds: string; executor?: true 
   { name: 'ticket/<id>/result', holds: 'its latest report', executor: true },
   { name: 'ticket/<id>/report/<id>', holds: 'the report of one of its assignments', executor: true },
   { name: 'ticket/<id>/transcript', holds: 'its Executor Session\'s messages, newest first', executor: true },
-  { name: 'ticket/<id>/message/<n>', holds: 'one message of that transcript', executor: true },
+  { name: 'ticket/<id>/message/<entry>', holds: 'one message; copy the read link from the transcript (DSH index or opaque Paseo ID)', executor: true },
   { name: 'ticket/<id>/input/<id>', holds: 'one input it was delivered', executor: true },
   { name: 'trigger/<id>', holds: 'a trigger\'s text, where it went, the message it replies to and the messages around it on its thread',
     executor: true },
@@ -61,8 +61,8 @@ export interface ResourceHost {
   readonly prompts: Pick<Prompts, 'current' | 'version' | 'history' | 'skills' | 'defaultChanged'>
   readonly commands: Commands
   readonly masterId: string
-  /** Projected transcript entries, retaining original indices for message resource links. */
-  transcript(sessionId: string): Promise<ReturnType<typeof transcriptEntry>[]>
+  /** Projected entries with backend IDs, or original DSH event indices, for message resource links. */
+  transcript(sessionId: string): Promise<(TranscriptEntry | undefined)[]>
   modelCatalog(): ReturnType<Context['sessionController']['modelCatalog']>
   promptVersion(sessionId: string): PromptVersion
   /** Whether a Session may read `revision` (the revision it currently runs under or any revision it ran under previously). */
@@ -269,8 +269,8 @@ const ROUTES: readonly Route[] = [
       const message = input && inputMessage(input, card)
       if (message === undefined) throw new Error('Unknown ticket input')
       body = message
-    } else if (section === 'message' && part && /^\d+$/.test(part)) {
-      const entry = (await transcript(host, id))[Number(part)]
+    } else if (section === 'message' && part) {
+      const entry = (await transcript(host, id)).find((entry, index) => (entry?.id ?? String(index)) === part)
       if (!entry) throw new Error('Unknown transcript entry')
       body = JSON.stringify(entry)
     } else if (section === 'report' && part) {
@@ -284,7 +284,7 @@ const ROUTES: readonly Route[] = [
       body = (await transcript(host, id)).flatMap((entry, index) => {
         const said = entry?.message.content.map(block => block.type === 'text' ? block.text : `[${block.type}]`).join(' ') ?? ''
         return entry ? [{ type: entry.type, preview: preview(said).slice(0, 80), chars: JSON.stringify(entry).length,
-          read: `ticket/${id}/message/${index}` }] : []
+          read: `ticket/${id}/message/${entry.id ?? index}` }] : []
       }).reverse().map(event => JSON.stringify(event)).join('\n')
     } else throw new Error('Unknown context resource')
     return text(read, body)

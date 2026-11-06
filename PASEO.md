@@ -4,7 +4,7 @@ This fork builds on the [DeepSeek Super Agent research prototype](https://github
 
 ## Current status
 
-The official Runtime now registers a default-closed local Source/Channel. An opt-in Unix socket and CLI submit explicit requests and read persisted replies. The Runtime still uses the original DSH Sessions, DshExecutor and setup, including its configured repository and agent GitHub CLI. Local input does not remove those setup dependencies.
+The official Runtime now registers a default-closed local Source/Channel. An opt-in Unix socket and CLI submit explicit requests and read persisted replies. Without the `paseo` configuration, the Runtime uses the original DSH Sessions and DshExecutor. Both backends retain the original setup, including its configured repository and agent GitHub CLI. Local input does not remove those setup dependencies.
 
 Tests exercise the real Runtime, coordinator tools, worker report tools, Engine and Outbox, with DSH model/session services mocked. They cover acknowledgement, questions, same-thread follow-up, upstream ready → completed, persisted replies, duplicate submissions and restart. This is not a live-model validation claim.
 
@@ -15,6 +15,10 @@ Paseo is now an opt-in coordinator/worker backend. The Runtime keeps the DSH Eng
 Enable it in the machine profile with `paseo.url`, `paseo.orchestrator`, `paseo.worker`, their mode IDs, and an absolute `bridgeCommand` pointing to `bin/superagent-mcp.mjs`. Keep `localRequests: true` and the local Source/Policy settings for the operator socket. The bridge socket is separate from the operator socket and is never a worker report transport.
 
 The Paseo backend has explicit limits: it does not provide DSH's silent history injection, child-job completion evidence, or a queue fence proving that a previously sent message cannot still arrive. Background notices are persisted and attached to the next coordinator message. Interruption records the exact request and fresh runtime observation; an idle observation is not treated as proof that unknown children have stopped.
+
+The existing `ticket/<id>/transcript` and message resources now also read Paseo's public timeline. Messages, combined tool inputs/outputs, errors and compaction markers are projected; reasoning and plugin UI items are omitted. Copy each returned `read` link: its opaque identity binds the agent, timeline epoch and original sequence. Missing bindings, reset/gapped histories, conflicting pages and reads beyond the 20-page bound return an explicit error. The projection is a live view, not an immutable transcript archive or evidence of task completion. Only the currently bound worker session is exposed.
+
+For the prepared local profile and day-to-day commands, see [Local usage](docs/local-usage.md).
 
 ## Local entry
 

@@ -29,6 +29,7 @@ import { PaseoSessions, type SessionPort } from '../paseo/sessions.ts'
 import { PaseoToolBridge } from '../paseo/bridge.ts'
 import { PaseoReports } from '../paseo/reports.ts'
 import { createPaseoAdapter, type PaseoAdapter } from '../paseo/client.ts'
+import { readPaseoTranscript } from '../paseo/transcript.ts'
 import { PaseoOperationJournal } from '../paseo-control/journal.ts'
 import { ticketCard } from './cards.ts'
 import { MasterAssessor } from './assessment.ts'
@@ -135,7 +136,7 @@ export class Runtime extends Service implements SourceHost {
       const environment = (ticket: Ticket) => this.ticketEnvironment(ticket)
       const resources: ResourceHost = { store, pages: new TextCache(4_000_000), prompts, commands, masterId,
         transcript: async id => {
-          if (machine.paseo) throw new Error('Paseo transcript projection is not yet available; use the Paseo session timeline')
+          if (machine.paseo) return readPaseoTranscript(this.paseo!, (this.sessions as PaseoSessions).agentId(id))
           return (await ctx.sessionController.inspect(id as SessionId)).events.map(transcriptEntry)
         },
         modelCatalog: () => {

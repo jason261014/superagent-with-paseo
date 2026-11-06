@@ -202,6 +202,10 @@ it('runs original coordinator/worker tools over the Paseo bridge, buffers early 
     }),
     findByLabels: vi.fn(async () => ({ kind: 'unknown' as const, matches: [], reason: 'not needed' })),
     findMessage: vi.fn(async (_id, messageId) => sent.has(messageId) ? { kind: 'present' as const, entry: {}, epoch: '1' } : { kind: 'unknown' as const, reason: 'not seen' }),
+    timeline: vi.fn(async () => ({ kind: 'complete' as const, epoch: '1', entries: [
+      { seqStart: 1, seqEnd: 3, timestamp: '2026-11-06T00:00:00Z', item: { type: 'reasoning', text: 'private reasoning' } },
+      { seqStart: 4, seqEnd: 7, timestamp: '2026-11-06T00:00:01Z', item: { type: 'assistant_message', text: 'A done' } },
+    ] })),
     snapshot: vi.fn(async id => ({ agentId: id, cwd: created.get(id)?.cwd ?? '', status: 'idle', activeTurn: null,
       pendingPermissions: [], observedAt: '', unknownChildren: true as const })),
     interrupt: vi.fn(async () => ({ requestSent: true as const, runtime: null })), archive: vi.fn(async () => ({ archivedAt: '' })), close: vi.fn(async () => {}),
@@ -225,6 +229,15 @@ it('runs original coordinator/worker tools over the Paseo bridge, buffers early 
   expect(ticket.attention?.question).toBe('A or B?')
   expect(ticket.assignments.at(-1)?.state).toBe('running')
   const worker = created.get('paseo-1')!
+  const transcript = await call('paseo-0', 'orchestrator_read', { resource: `ticket/${ticket.id}/transcript` }, 'transcript') as { text: string }
+  const message = JSON.parse(transcript.text) as { read: string; preview: string }
+  expect(message.preview).toBe('A done')
+  expect(adapter.timeline).toHaveBeenCalledWith('paseo-1')
+  expect(transcript.text).not.toContain('private reasoning')
+  await expect(call('paseo-1', 'orchestrator_read', { resource: message.read }, 'message')).resolves.toMatchObject({ text: expect.stringContaining('A done') })
+  await expect(call('paseo-0', 'orchestrator_read', { resource: `ticket/${ticket.id}/message/1` }, 'unknown-message')).rejects.toThrow('Unknown transcript entry')
+  vi.mocked(adapter.timeline).mockResolvedValueOnce({ kind: 'unknown', reason: 'TIMELINE_GAP' })
+  await expect(call('paseo-0', 'orchestrator_read', { resource: `ticket/${ticket.id}/transcript` }, 'gapped-transcript')).rejects.toThrow('TIMELINE_GAP')
   expect(worker.config.systemPrompt).toContain('dsh-superagent prompt revision')
   expect(worker.config.systemPrompt).toContain('Paseo')
   expect(worker.cwd).toBe(ticket.execution!.directory)
@@ -247,6 +260,7 @@ it('runs original coordinator/worker tools over the Paseo bridge, buffers early 
   await (await restart(machine, { feishu: null })).ready
   expect(adapter.create).toHaveBeenCalledTimes(2)
   expect(runtime.store.tickets.get(ticket.id)!.assignments.at(-1)!.id).toBe(assignment.id)
+  await expect(call('paseo-0', 'orchestrator_read', { resource: message.read }, 'restored-message')).resolves.toMatchObject({ text: expect.stringContaining('A done') })
   await expect(localCall(directory, 'POST', '/requests', request)).resolves.toEqual({ result: 'duplicate' })
   await expect(localCall(directory, 'GET', '/threads/paseo-thread')).resolves.toEqual(replies)
 })

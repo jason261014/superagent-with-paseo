@@ -30,6 +30,8 @@ const page = (entries: unknown[], hasMore: boolean, nextCursor: string | null = 
 const entry = (id: string, task = 'task-1') => ({ agent: { id, cwd: '/tmp/work', labels: { task } } })
 const history = (entries: unknown[], hasOlder: boolean, startCursor: unknown = null, extra: object = {}) =>
   ({ entries, hasOlder, startCursor, epoch: 'e1', gap: false, staleCursor: false, ...extra })
+const timelineEntry = (seqStart: number, seqEnd = seqStart) =>
+  ({ seqStart, seqEnd, timestamp: '2026-11-06T00:00:00Z', item: { type: 'assistant_message', text: `Message ${seqStart}` } })
 
 describe('Paseo session adapter', () => {
   it('accepts only loopback URLs and safe, exact stop targets', () => {
@@ -114,6 +116,43 @@ describe('Paseo session adapter', () => {
     await adapter.snapshot('agent-001')
     exec.mockRejectedValueOnce(new Error('timeout'))
     expect(await adapter.interrupt('agent-001')).toMatchObject({ requestSent: null })
+  })
+
+  it('reads the full timeline chronologically and deduplicates identical page overlap', async () => {
+    const { adapter, state, handle } = fixture()
+    const cursor = { epoch: 'e1', seq: 7 }
+    state.history.push(history([timelineEntry(7, 9), timelineEntry(10)], true, cursor),
+      history([timelineEntry(1, 6), timelineEntry(7, 9)], false))
+    expect(await adapter.timeline('agent-001')).toEqual({ kind: 'complete', epoch: 'e1',
+      entries: [timelineEntry(1, 6), timelineEntry(7, 9), timelineEntry(10)] })
+    expect(handle.timeline.refetch).toHaveBeenNthCalledWith(2, { direction: 'before', cursor, limit: 200 })
+    state.history.push(history([], false))
+    expect(await adapter.timeline('agent-001')).toEqual({ kind: 'complete', epoch: 'e1', entries: [] })
+  })
+
+  it('never publishes an incomplete, reset, changing or malformed transcript as complete', async () => {
+    const cursor = { epoch: 'e1', seq: 7 }
+    for (const pages of [
+      [history([], false, null, { gap: true })],
+      [history([], false, null, { reset: true })],
+      [history([], false, null, { staleCursor: true })],
+      [history([], false, null, { error: 'missing' })],
+      [history([], true, cursor), history([], false, null, { epoch: 'e2' })],
+      [history([], true, cursor), history([], true, cursor)],
+      [history([], true, cursor), history([], true, { epoch: 'e1', seq: 8 })],
+      [history([], true, { epoch: 'e2', seq: 7 })],
+      [history([], true)],
+      [history([timelineEntry(-1)], false)],
+      [history([timelineEntry(1, 0)], false)],
+      [history([timelineEntry(1, 4), timelineEntry(3, 5)], false)],
+      [history([timelineEntry(7)], true, cursor), history([timelineEntry(7, 9)], false)],
+      [history([timelineEntry(7)], true, cursor), history([{ ...timelineEntry(7), item: { type: 'assistant_message', text: 'changed' } }], false)],
+      [history([timelineEntry(7)], true, cursor)],
+      Array.from({ length: 20 }, (_, i) => history([timelineEntry(100 - i)], true, { epoch: 'e1', seq: 100 - i })),
+    ]) {
+      const { adapter, state } = fixture(); state.history.push(...pages)
+      expect((await adapter.timeline('agent-001')).kind).toBe('unknown')
+    }
   })
 
   it('never stops or archives an ID that was only supplied or returned as another ID', async () => {

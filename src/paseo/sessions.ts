@@ -39,6 +39,7 @@ export class PaseoSessions implements SessionPort {
   }
   install(): void {}
   dispose(): void {}
+  agentId(id: string): string | undefined { return this.host.store.get(bindings(id))?.agentId }
   private instructions(version: PromptVersion, ticket?: Ticket): string {
     return '[dsh-superagent prompt revision ' + version.revision + ']\n'
       + this.host.prompts.compose(version.config, ticket ? 'worker' : 'orchestrator', ticket ? this.host.environment(ticket) : undefined)

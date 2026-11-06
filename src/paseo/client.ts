@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process'
-import { promisify } from 'node:util'
+import { isDeepStrictEqual, promisify } from 'node:util'
 import { createPaseoClient, type PaseoAgentCreateOptions, type PaseoClient } from '@getpaseo/client'
 
 const execFileAsync = promisify(execFile)
@@ -50,11 +50,20 @@ export interface RuntimeSnapshot {
 }
 export type MessageLookup = { kind: 'present'; entry: unknown; epoch: string } |
   { kind: 'absent_confirmed'; epoch: string } | { kind: 'unknown'; reason: string }
+export interface PaseoTimelineEntry {
+  item: unknown
+  timestamp: string
+  seqStart: number
+  seqEnd: number
+}
+export type TimelineLookup = { kind: 'complete'; epoch: string; entries: PaseoTimelineEntry[] } |
+  { kind: 'unknown'; reason: string }
 export interface PaseoAdapter {
   create(input: PaseoAgentCreateOptions): Promise<{ agentId: string; cwd: string }>
   send(agentId: string, text: string, messageId: string): Promise<void>
   findByLabels(labels: Record<string, string>): Promise<LabelLookup>
   findMessage(agentId: string, messageId: string): Promise<MessageLookup>
+  timeline(agentId: string): Promise<TimelineLookup>
   snapshot(agentId: string): Promise<RuntimeSnapshot>
   interrupt(agentId: string): Promise<{ requestSent: true | null; runtime: RuntimeSnapshot | null }>
   archive(agentId: string): Promise<{ archivedAt: string }>
@@ -181,6 +190,52 @@ export function createPaseoAdapter(options: PaseoAdapterOptions): PaseoAdapter {
         }
         return { kind: 'unknown' as const, reason: 'HISTORY_BOUND' }
       } catch { return { kind: 'unknown' as const, reason: 'HISTORY_FAILED' } }
+    },
+
+    async timeline(agentId: string): Promise<TimelineLookup> {
+      assertId(agentId)
+      try {
+        const handle = (await connected()).agents.ref(agentId)
+        const entries = new Map<number, PaseoTimelineEntry>()
+        let epoch: string | null = null
+        let cursor: { epoch: string; seq: number } | undefined
+        for (let page = 0; page < MAX_HISTORY_PAGES; page++) {
+          const result = await handle.timeline.refetch({ direction: cursor ? 'before' : 'tail',
+            ...(cursor ? { cursor } : {}), limit: HISTORY_LIMIT })
+          if (!result || result.error || !Array.isArray(result.entries) || typeof result.epoch !== 'string' ||
+              typeof result.hasOlder !== 'boolean' || result.reset || result.gap || result.staleCursor) {
+            return { kind: 'unknown', reason: result?.gap || result?.staleCursor ? 'TIMELINE_GAP' : 'INVALID_HISTORY' }
+          }
+          if (epoch !== null && epoch !== result.epoch) return { kind: 'unknown', reason: 'EPOCH_CHANGED' }
+          epoch = result.epoch
+          for (const entry of result.entries) {
+            if (!entry || typeof entry !== 'object' || typeof entry.seqStart !== 'number' ||
+                !Number.isSafeInteger(entry.seqStart) || entry.seqStart < 0 || typeof entry.seqEnd !== 'number' ||
+                !Number.isSafeInteger(entry.seqEnd) || entry.seqEnd < entry.seqStart ||
+                typeof entry.timestamp !== 'string' || !('item' in entry)) {
+              return { kind: 'unknown', reason: 'INVALID_ENTRY' }
+            }
+            const projected = { item: entry.item, timestamp: entry.timestamp, seqStart: entry.seqStart, seqEnd: entry.seqEnd }
+            const old = entries.get(entry.seqStart)
+            if (old && !isDeepStrictEqual(old, projected)) return { kind: 'unknown', reason: 'HISTORY_CHANGED' }
+            entries.set(entry.seqStart, projected)
+          }
+          if (!result.hasOlder) {
+            const sorted = [...entries.values()].sort((a, b) => a.seqStart - b.seqStart)
+            if (sorted.some((entry, i) => i > 0 && entry.seqStart <= sorted[i - 1]!.seqEnd)) {
+              return { kind: 'unknown', reason: 'HISTORY_CHANGED' }
+            }
+            return { kind: 'complete', epoch: epoch!, entries: sorted }
+          }
+          const next = result.startCursor
+          if (!next || typeof next.epoch !== 'string' || !Number.isSafeInteger(next.seq) ||
+              next.seq < 0 || next.epoch !== epoch || (cursor && next.seq >= cursor.seq)) {
+            return { kind: 'unknown', reason: 'HISTORY_BOUND' }
+          }
+          cursor = next
+        }
+        return { kind: 'unknown', reason: 'HISTORY_BOUND' }
+      } catch { return { kind: 'unknown', reason: 'HISTORY_FAILED' } }
     },
 
     snapshot,

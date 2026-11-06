@@ -43,3 +43,5 @@
 ## 本轮记录
 
 2026-11-05：第 1、2 步已完成，含独立 DSH profile 的真实 A/B 问答、文件产出、ready 完成及重启去重。见 [验证记录](2026-11-05-local-entry-validation.md)。第 3、4 步已完成：Paseo 会话、MCP 原工具桥、assignment 报告回执、重启绑定与中断观测已实现；真实 Paseo A/B 演练生成 `paseo-smoke:A` 并以 upstream `ready → completed` 收尾。`pnpm check` 通过 1249 项测试、类型检查和构建。
+
+2026-11-06：接续补齐 Paseo timeline → 原 transcript/message 资源的只读适配，保留原任务语义。`pnpm check` 通过 66 个测试文件 / 1255 项测试，实际 Runtime 工具桥成功读取上轮 worker 的 8 条消息与工具记录。已保存持久启动覆盖配置，并补充 [本地使用指南](../../local-usage.md)；验证进程已退出。
