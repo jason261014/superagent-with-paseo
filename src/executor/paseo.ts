@@ -1,4 +1,4 @@
-/** Optional Paseo Executor building block. Not installed in Runtime; callers supply frozen inputs and a worker report bridge. */
+/** Opt-in Paseo Executor wired by Runtime with frozen inputs and an assignment-bound worker report bridge. */
 import { createHash } from 'node:crypto'
 import type { PaseoAgentCreateOptions } from '@getpaseo/client'
 import type { Effects } from '../app/effects.ts'
