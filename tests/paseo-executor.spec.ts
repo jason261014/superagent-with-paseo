@@ -54,7 +54,7 @@ function setup() {
 }
 
 describe('Paseo Executor with real Engine and durable effects', () => {
-  it('dispatches, sends inputs, preserves unread state and stops by exact assignment', async () => {
+  it('dispatches, sends and records Paseo input consumption before a report, then stops by exact assignment', async () => {
     const h = setup(); const ticketId = h.accept()
     // Intent and domain write share a transaction. Before the effect loop runs, no session exists.
     expect(store.db.prepare("SELECT COUNT(*) AS count FROM effect WHERE kind='paseoLaunch'").get()?.count).toBe(1)
@@ -65,7 +65,7 @@ describe('Paseo Executor with real Engine and durable effects', () => {
     h.engine.receive(h.trigger('two')); await h.effects.idle()
     const input = store.tickets.get(ticketId)!.inputs[0]!
     expect(input.kind).toBe('trigger')
-    if (input.kind === 'trigger') expect(input.readAt).toBeNull()
+    if (input.kind === 'trigger') expect(input.readAt).toEqual(expect.any(String))
     expect(h.paseo.send).toHaveBeenCalledTimes(2)
     expect(() => h.executor.report(ticketId, 'wrong-assignment', { state: 'progress', summary: 'stale' })).toThrow()
     h.executor.report(ticketId, assignment.id, { state: 'progress', summary: 'working' })
@@ -76,9 +76,12 @@ describe('Paseo Executor with real Engine and durable effects', () => {
 
   it('preserves upstream ready and dropped completion without a separate delivery gate', async () => {
     const h = setup(), ticketId = h.accept(); h.effects.start(); await h.effects.idle()
+    h.engine.receive(h.trigger('followup')); await h.effects.idle()
     const assignment = store.tickets.get(ticketId)!.assignments.at(-1)!
     const result = h.executor.report(ticketId, assignment.id, { state: 'ready', summary: 'done' })
     expect(result.ended?.outcome).toBe('completed')
+    expect(store.triggers.disposition('followup')?.fanout).toContain(ticketId)
+    expect(store.threads.get('chat:thread')?.pending).toEqual([])
     await h.effects.idle()
   })
 

@@ -32,6 +32,8 @@ export interface PaseoSessionsHost {
 /** Implements the narrow Session lifecycle and delivery port over Paseo agents. */
 export class PaseoSessions implements SessionPort {
   constructor(private readonly host: PaseoSessionsHost) {
+    if ([host.config.orchestrator, host.config.worker].some(role => role.split('/')[0] === 'superagent'))
+      throw new Error('Superagent is a conversation entry, not a coordinator/worker model provider')
     host.effects.handle('relay', ({ text }, id) => this.prompt(host.masterId, id, text, 'steer'), { ordered: true })
     host.effects.handle('notice', async ({ value, summary }, name) => {
       host.store.set(notices(name), { text: JSON.stringify(value), summary })

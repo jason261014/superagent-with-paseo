@@ -14,6 +14,7 @@ import { bridgeSocketPath } from '../src/paseo/bridge.ts'
 import * as paseoClient from '../src/paseo/client.ts'
 import type { PaseoAgentCreateOptions } from '@getpaseo/client'
 import { localTrigger } from '../src/sources/local.ts'
+import type { ConversationBinding, ConversationReceiptView, ConversationPage } from '../src/local/protocol.ts'
 import { existsSync } from 'node:fs'
 import { jobRegistry } from './fixtures/host.ts'
 import { evalsHealth } from '../src/app/views/overview.ts'
@@ -185,6 +186,57 @@ it('runs local IPC through the official coordinator tools, DSH worker and persis
   await runtime.stop()
   expect(existsSync(localSocketPath(directory))).toBe(false)
 })
+it('routes independent Paseo conversation inputs, scoped context, follow-ups, replies and stop through original tools', async () => {
+  await (await restart({ localRequests: true }, { feishu: null })).ready
+  expect(await localCall(directory, 'GET', '/paseo/binding')).toMatchObject({ binding: null })
+  await expect(localCall(directory, 'POST', '/paseo/binding')).rejects.toThrow('LOCAL_SOURCE_DISABLED')
+  const settings = runtime.store.settings()
+  runtime.store.saveSettings({ ...settings,
+    sources: { ...settings.sources, local: { enabled: true, config: { acceptRequests: true } } },
+    policy: { ...settings.policy, sources: { ...settings.policy.sources, local: { allowed: [{ id: `uid:${process.getuid!()}` }] } } },
+  })
+  const { binding } = await localCall(directory, 'POST', '/paseo/binding') as { binding: ConversationBinding }
+  const submit = async (clientMessageId: string, text: string) => {
+    const receipt = await localCall(directory, 'POST', '/paseo/requests', { binding, clientMessageId, text }) as ConversationReceiptView
+    await runtime.idle(); return receipt
+  }
+  const first = await submit('conversation-1', 'Create an A/B result file')
+  expect(relays(runtime.masterId).find(item => item.trigger_id === first.triggerId)).toMatchObject({
+    conversation: { conversation_id: binding.conversationId, read: `conversation/${binding.conversationId}/through/1` },
+  })
+  const accepted = await route({ kind: 'accept', trigger_id: first.triggerId, title: 'A/B result', worktree_name: 'ab-result', acknowledgement: 'Creating the result.' })
+  const ticketId = (accepted.ticket as { ticket_id: string }).ticket_id, worker = `worker-${ticketId}`
+  await runTool(worker, 'orchestrator_report', { state: 'progress', summary: 'Need choice', human_action: 'A or B?' })
+  await runTool(runtime.masterId, 'orchestrator_reply', { ticket_id: ticketId, purpose: 'attention', human_action: 'A or B?', text: 'A or B?' })
+  const second = await submit('conversation-2', 'Investigate an unrelated issue')
+  expect(runtime.store.triggers.disposition(second.triggerId)?.fanout).toEqual([])
+  const other = await route({ kind: 'accept', trigger_id: second.triggerId, title: 'Other task', worktree_name: 'other-task', acknowledgement: 'Investigating the issue.' })
+  const otherId = (other.ticket as { ticket_id: string }).ticket_id
+  const followup = await submit('conversation-3', 'Choose A for the result file')
+  expect(runtime.store.triggers.disposition(followup.triggerId)?.fanout).toEqual([])
+  await route({ kind: 'attach', trigger_id: followup.triggerId, ticket_id: ticketId })
+  expect(runtime.store.triggers.disposition(followup.triggerId)?.fanout).toEqual([ticketId])
+  expect(runtime.store.tickets.get(otherId)!.inputs.some(input => input.kind === 'trigger' && input.triggerId === followup.triggerId)).toBe(false)
+  await runTool(worker, 'orchestrator_report', { state: 'ready', summary: 'Result A created', human_action: null })
+  await runTool(runtime.masterId, 'orchestrator_reply', { ticket_id: ticketId, purpose: 'result', text: 'Result A created.' })
+  expect(runtime.store.tickets.get(ticketId)!.ended?.outcome).toBe('completed')
+  const page = await localCall(directory, 'GET', '/paseo/events?after=0') as ConversationPage
+  expect(page.items.filter(item => item.type === 'assistant').map(item => item.text)).toEqual(['Creating the result.', 'A or B?', 'Investigating the issue.', 'Result A created.'])
+  const scoped = await runTool(runtime.masterId, 'orchestrator_read', { resource: `conversation/${binding.conversationId}/through/1` })
+  expect(scoped).toMatchObject({ items: [{ text: 'Create an A/B result file' }], next_offset: null })
+  await expect(runTool(`worker-${otherId}`, 'orchestrator_read', { resource: `conversation/${binding.conversationId}/through/1` })).rejects.toThrow()
+  await expect(localCall(directory, 'GET', '/paseo/events?after=abc')).rejects.toThrow('LOCAL_CONVERSATION_CURSOR')
+  const stop = await submit('conversation-stop', 'Stop the unrelated issue task')
+  await route({ kind: 'stop', trigger_id: stop.triggerId, ticket_id: otherId, reason: 'Human asked to stop' })
+  expect(runtime.store.tickets.get(otherId)!.ended?.outcome).toBe('stopped')
+  const duplicate = await submit('conversation-1', 'Create an A/B result file')
+  expect(duplicate).toMatchObject({ result: 'duplicate', triggerId: first.triggerId })
+  expect(runtime.store.tickets.list()).toHaveLength(2)
+  await (await restart({ localRequests: true }, { feishu: null })).ready
+  expect(await localCall(directory, 'GET', '/paseo/binding')).toMatchObject({ binding })
+  const restored = await localCall(directory, 'GET', '/paseo/events?after=0') as ConversationPage
+  expect(restored.items.slice(0, page.items.length)).toEqual(page.items)
+})
 it('runs original coordinator/worker tools over the Paseo bridge, buffers early reports and restores bindings', async () => {
   const created = new Map<string, PaseoAgentCreateOptions>(), sent = new Map<string, string>()
   let early: unknown
@@ -246,7 +298,7 @@ it('runs original coordinator/worker tools over the Paseo bridge, buffers early 
   await call('paseo-0', 'orchestrator_reply', { ticket_id: ticket.id, purpose: 'attention', human_action: 'A or B?', text: 'A or B?' }, 'question')
   await localCall(directory, 'POST', '/requests', { requestId: 'paseo-2', threadId: request.threadId, text: 'A' }); await runtime.idle()
   const input = runtime.store.tickets.get(ticket.id)!.inputs.at(-1)!
-  if (input.kind === 'trigger') expect(input.readAt).toBeNull()
+  if (input.kind === 'trigger') expect(input.readAt).toEqual(expect.any(String))
   const result = await call('paseo-1', 'orchestrator_report', { state: 'ready', summary: 'A done', human_action: null }, 'done')
   await runtime.idle()
   expect(result).toMatchObject({ reported: true })

@@ -61,7 +61,8 @@ export function localTrigger(request: LocalRequest, at = new Date().toISOString(
 }
 
 /** Store-backed Source/Channel adapter for an authenticated, trusted in-process caller. No transport is opened. */
-export function createLocalSource(store: Pick<Store, 'atomic' | 'get' | 'set' | 'triggers'>) {
+export function createLocalSource(store: Pick<Store, 'atomic' | 'get' | 'set' | 'triggers'>,
+  recordReply?: (message: OutboundMessage) => void) {
   const sameMessage = (left: OutboundMessage, right: OutboundMessage) => left.id === right.id && left.text === right.text &&
     left.kind === right.kind && left.ticketId === right.ticketId && left.channel.source === right.channel.source &&
     left.channel.thread === right.channel.thread && left.channel.address.actorId === right.channel.address.actorId &&
@@ -86,6 +87,7 @@ export function createLocalSource(store: Pick<Store, 'atomic' | 'get' | 'set' | 
             store.set(name, { id, channel, text, kind, ...(ticketId ? { ticketId } : {}) })
             const index = KV.local.threadReplies(message.channel.thread)
             store.set(index, [...store.get(index) ?? [], message.id])
+            recordReply?.(message)
           }
         })
         return 'sent'

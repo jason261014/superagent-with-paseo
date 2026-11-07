@@ -3,3 +3,6 @@ lib/
 .artifacts/
 .env
 coverage/
+paseo-plugin/lib/
+paseo-plugin/server/
+paseo-plugin/config.json

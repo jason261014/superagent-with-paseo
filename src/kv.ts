@@ -7,6 +7,8 @@ import type { SettingsVersion } from './app/store.ts'
 import type { SettingsSave } from './policy.ts'
 import type { Retry } from './sources/github.ts'
 import type { OutboundMessage } from './core/index.ts'
+import type { ConversationBinding, ConversationReceipt } from './local/protocol.ts'
+import type { ConversationIndex } from './local/conversation.ts'
 
 /** Key of a KV record whose value has type `V`; a plain string represents an untyped key. */
 export type Key<V> = string & { readonly __value?: V }
@@ -22,6 +24,10 @@ export function family<V, A extends unknown[] = [string]>(prefix: string, format
 export const KV = {
   /** Local Source: replies delivered through the existing Outbox, indexed by stable message identity. */
   local: { reply: family<OutboundMessage>('local-reply:'), threadReplies: family<string[]>('local-thread-replies:') },
+  conversation: { binding: record<ConversationBinding>('conversation-binding'), seq: record<number>('conversation-seq'),
+    receipt: family<ConversationReceipt>('conversation-receipt:'), channel: family<string>('conversation-channel:'),
+    trigger: family<string>('conversation-trigger:'), reply: family<number>('conversation-reply:'),
+    event: family<ConversationIndex, [seq: number]>('conversation-event:', seq => String(seq).padStart(16, '0')) },
   /** Store: current database schema version. */
   store: { schema: record<number>('schema') },
   /** Settings: current revision, per-block revision, and saved settings snapshots (including the current one). */

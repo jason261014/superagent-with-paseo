@@ -5,6 +5,8 @@ import { join } from 'node:path'
 import type { Socket } from 'node:net'
 import type { LocalRequest } from '../sources/local.ts'
 import type { OutboundMessage, ReceiveResult } from '../core/index.ts'
+import type { LocalConversation } from './conversation.ts'
+import { ConversationInput } from './protocol.ts'
 
 const MAX_BODY = 524_288 // A 64 KiB text can expand when JSON escapes control characters.
 const MAX_REPLY = 8 * 1024 * 1024
@@ -13,6 +15,7 @@ export interface LocalHost {
   receive(request: LocalRequest): ReceiveResult
   replies(threadId: string): OutboundMessage[]
   status(): { configured: boolean; paused: boolean; accepting: boolean; actor: string }
+  conversation?: LocalConversation
 }
 const errorCode = (error: unknown): string => {
   const message = error instanceof Error ? error.message : ''
@@ -61,11 +64,37 @@ export async function listenLocal(stateDir: string, host: LocalHost): Promise<{ 
     }
     try {
       if (req.method === 'GET' && req.url === '/status') { reply(200, host.status()); return }
+      const url = new URL(req.url ?? '/', 'http://local')
+      if (host.conversation && url.pathname.startsWith('/paseo/')) {
+        const conversation = host.conversation
+        if (req.method === 'GET' && url.pathname === '/paseo/binding') {
+          reply(200, { binding: conversation.binding() ?? null, status: host.status() }); return
+        }
+        if (req.method === 'POST' && url.pathname === '/paseo/binding') {
+          if (!host.status().accepting) { reply(409, { error: 'LOCAL_SOURCE_DISABLED' }); return }
+          reply(200, { binding: conversation.bind(), status: host.status() }); return
+        }
+        if (req.method === 'GET' && url.pathname.startsWith('/paseo/requests/')) {
+          const id = url.pathname.slice('/paseo/requests/'.length)
+          if (!/^paseo-[a-f0-9]{64}$/.test(id)) throw new Error('LOCAL_INVALID_REQUEST')
+          reply(200, { binding: conversation.binding() ?? null, receipt: conversation.receipt(id) ?? null }); return
+        }
+        if (req.method === 'GET' && url.pathname === '/paseo/events') {
+          const number = (name: string, fallback?: number) => {
+            const text = url.searchParams.get(name)
+            if (text === null) return fallback
+            if (!/^(0|[1-9][0-9]*)$/.test(text)) throw new Error('LOCAL_CONVERSATION_CURSOR')
+            return Number(text)
+          }
+          reply(200, conversation.events(number('after', 0), number('through'), number('limit', 100))); return
+        }
+      }
       if (req.method === 'GET' && req.url?.startsWith('/threads/')) {
         const messages = host.replies(decodeURIComponent(req.url.slice('/threads/'.length)))
         reply(200, { messages }); return
       }
-      if (req.method !== 'POST' || req.url !== '/requests') { reply(404, { error: 'LOCAL_NOT_FOUND' }); return }
+      const conversationRequest = !!host.conversation && req.url === '/paseo/requests'
+      if (req.method !== 'POST' || (req.url !== '/requests' && !conversationRequest)) { reply(404, { error: 'LOCAL_NOT_FOUND' }); return }
       if (!host.status().accepting) { reply(409, { error: 'LOCAL_SOURCE_DISABLED' }); return }
       let size = 0
       const chunks: Buffer[] = []
@@ -76,8 +105,9 @@ export async function listenLocal(stateDir: string, host: LocalHost): Promise<{ 
       }
       // Admission is checked again after reading the body; settings may have changed meanwhile.
       if (!host.status().accepting) { reply(409, { error: 'LOCAL_SOURCE_DISABLED' }); return }
-      const result = host.receive(JSON.parse(Buffer.concat(chunks).toString('utf8')) as LocalRequest)
-      reply(200, { result })
+      const body = JSON.parse(Buffer.concat(chunks).toString('utf8'))
+      if (conversationRequest) reply(200, host.conversation!.receive(ConversationInput.parse(body), request => host.receive(request)))
+      else reply(200, { result: host.receive(body as LocalRequest) })
     } catch (error) { reply(errorCode(error) === 'LOCAL_REQUEST_CONFLICT' ? 409 : 400, { error: errorCode(error) }) }
   })
 }

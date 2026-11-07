@@ -302,6 +302,12 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/sources/local.ts` | Default-closed local Source/Channel, atomic replay checks and ordered persistent replies through the official Outbox |
 | `src/local/transport.ts` | Opt-in owner-only Unix socket, lifecycle and bounded request client for the official Runtime |
 | `src/local/cli.ts` | Submit explicit local requests and read status/replies without starting a host |
+| `src/local/conversation.ts` | Durable binding, request receipts, conversation event index and ticket context for the Paseo provider |
+| `src/local/protocol.ts` | Zod-validated private conversation binding, request, receipt and event protocol |
+| `src/paseo-ui/connection.ts` | Paseo provider session lifecycle, prompt delivery, replay and event polling |
+| `src/paseo-ui/pending.ts` | Crash-durable owner-local journal for prompts waiting to be submitted or reconciled |
+| `src/paseo-ui/provider.ts` | Registration of the no-model `superagent` provider and its capability contract |
+| `src/paseo-ui/transport.ts` | Typed client for the Runtime's private Paseo conversation IPC endpoints |
 | `src/index.ts` | The main plugin entry: reads the machine settings, starts the Runtime, and gives it the restart that a save of a Source's account uses |
 | `src/deployment.ts` | The plugin `Config` and `Machine`; `resolveDeployment` and `resolveFeishuBot` read the repository and the accounts from the Source settings, each CLI run as Executor shells run it; `SETUP_FIELDS` lists the Source fields setup reads. The code names no person, account or organization |
 | `src/setup.ts` | Setup problems: `SetupError`, with a code, the place that fixes it and the English text the log, the main Session and the panel share |
@@ -443,6 +449,8 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/delivery.spec.ts` | `AgentDelivery` |
 | `tests/retry-health.spec.ts`, `tests/role-models.spec.ts` | Model budget retries, and the models of the two roles |
 | `tests/runtime.spec.ts` | The whole application on a simulated DeepSeek Harness host, through tools and HTTP |
+| `tests/local-conversation.spec.ts` | Conversation binding, idempotent receipts, event replay and ticket context |
+| `tests/paseo-ui.spec.ts` | Provider capabilities, prompt validation, persistence, polling and interruption behavior |
 | `tests/tools.spec.ts` | The Sessions' tools: what `orchestrator_read` reads for each role, and the shapes and checks of the other main Session tools |
 | `tests/runtime-concurrency.spec.ts` | Work that overlaps: Triggers during a pass, Tickets that change during deliveries and launches |
 | `tests/http.spec.ts` | The same-origin and loopback checks, the status of each kind of failure, the body limit, path parameters and queries |

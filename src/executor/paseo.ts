@@ -15,7 +15,7 @@ export interface PaseoExecutorHost {
   effects: Pick<Effects, 'enqueue' | 'handle'>
   journal: PaseoOperationJournal
   paseo: Pick<PaseoAdapter, 'create' | 'send' | 'findByLabels' | 'findMessage' | 'snapshot' | 'interrupt'>
-  engine: Pick<EngineForExecutor, 'assignmentStarted' | 'inputsDelivered' | 'deliveryFailed' | 'reportForAssignment'>
+  engine: Pick<EngineForExecutor, 'assignmentStarted' | 'inputsDelivered' | 'inputsRead' | 'deliveryFailed' | 'reportForAssignment'>
   /** Must return the same frozen configuration on replay. */
   createOptions(ticket: Ticket, assignment: Assignment): PaseoAgentCreateOptions
   started?(ticketId: string, assignmentId: string): void
@@ -171,7 +171,13 @@ export class PaseoExecutor implements Executor {
       }
       this.host.store.atomic(() => {
         const fresh = this.current(ticketId, assignmentId, 'running')
-        if (fresh?.ticket.undelivered.includes(inputId)) this.host.engine.inputsDelivered(ticketId, assignmentId, [inputId])
+        if (fresh?.ticket.undelivered.includes(inputId)) {
+          // Paseo has no DSH session-event hook for a silent user-message claim. A confirmed
+          // prompt send is therefore the adapter's consumption witness; record it before a
+          // subsequent ready report so the core's read-before-report cutoff remains strict.
+          this.host.engine.inputsDelivered(ticketId, assignmentId, [inputId])
+          this.host.engine.inputsRead(ticketId, [inputId])
+        }
       })
     }
   }

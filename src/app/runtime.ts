@@ -19,6 +19,7 @@ import { allowedSender, settingsPolicy } from '../policy.ts'
 import { SourceRegistry } from '../sources/registry.ts'
 import { createLocalSource, type LocalRequest } from '../sources/local.ts'
 import { listenLocal } from '../local/transport.ts'
+import { LocalConversation } from '../local/conversation.ts'
 import { Commands } from '../infra/commands.ts'
 import type { Deployment, Machine } from '../deployment.ts'
 import { environmentOf, ticketEnvironment, type Variable } from './execution-environment.ts'
@@ -74,6 +75,7 @@ export class Runtime extends Service implements SourceHost {
   readonly effects: Effects
   readonly sources: SourceRegistry
   readonly local: ReturnType<typeof createLocalSource>
+  readonly conversation: LocalConversation
   private localTransport?: Awaited<ReturnType<typeof listenLocal>>
   private localOpening?: ReturnType<typeof listenLocal>
   readonly commands: Commands
@@ -129,12 +131,13 @@ export class Runtime extends Service implements SourceHost {
           .catch(() => { /* sync() records its failure in health. */ })
         return () => {}
       })
-      this.local = createLocalSource(store)
+      const conversation = this.conversation = new LocalConversation(store)
+      this.local = createLocalSource(store, message => conversation.recordReply(message))
       this.disposers.push(sources.register(this.local.kind))
-      const links: LinkHost = { store, links: this.sourceLinks, commands, sources, lifetime: this.lifetime }
+      const links: LinkHost = { store, conversation, links: this.sourceLinks, commands, sources, lifetime: this.lifetime }
       const link = (trigger: Trigger, signal?: AbortSignal) => sourceLink(links, trigger, signal)
       const environment = (ticket: Ticket) => this.ticketEnvironment(ticket)
-      const resources: ResourceHost = { store, pages: new TextCache(4_000_000), prompts, commands, masterId,
+      const resources: ResourceHost = { store, conversation, pages: new TextCache(4_000_000), prompts, commands, masterId,
         transcript: async id => {
           if (machine.paseo) return readPaseoTranscript(this.paseo!, (this.sessions as PaseoSessions).agentId(id))
           return (await ctx.sessionController.inspect(id as SessionId)).events.map(transcriptEntry)
@@ -282,6 +285,7 @@ export class Runtime extends Service implements SourceHost {
     if (this.machine.localRequests) {
       this.localTransport = await (this.localOpening = listenLocal(this.machine.stateDir, {
         receive: request => this.receiveLocal(request), replies: thread => this.local.replies(thread), status: () => this.localStatus(),
+        conversation: this.conversation,
       }))
       this.lifetime.addEventListener('abort', () => { void this.localTransport?.close() }, { once: true })
       if (this.closing() || this.lifetime.aborted) { await this.localTransport.close(); return }

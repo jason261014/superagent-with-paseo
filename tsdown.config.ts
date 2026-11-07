@@ -7,6 +7,8 @@ const raw = { name: 'raw',
   load: (id: string) => id.endsWith('?raw') ? { code: `export default ${JSON.stringify(readFileSync(id.slice(0, -4), 'utf8'))}`, moduleType: 'js' as const }
     : undefined }
 export default defineConfig([
+  { entry: { provider: 'src/paseo-ui/provider.ts' }, outDir: 'paseo-plugin/server', format: 'esm', platform: 'node', target: 'es2024', dts: false,
+    deps: { alwaysBundle: ['zod'] } },
   { entry: { index: 'src/index.ts', 'github-watch': 'src/sources/github.ts', 'feishu-watch': 'src/sources/feishu.ts', 'local-cli': 'src/local/cli.ts', 'paseo-mcp': 'src/paseo/mcp.ts' }, outDir: 'lib', format: 'esm', fixedExtension: false, platform: 'node', target: 'es2024', dts: true, clean: true, deps: { neverBundle: [/^@deepseek-ai\//, /^@modelcontextprotocol\//, 'zod', 'proper-lockfile'] } },
   { entry: { client: 'src/client/index.tsx' }, outDir: 'lib', format: 'cjs', platform: 'browser', dts: false, clean: false, plugins: [raw],
     deps: { neverBundle: ['react', 'react/jsx-runtime', 'react-dom'] },
