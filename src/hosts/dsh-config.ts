@@ -38,4 +38,3 @@ export function machineOf(config: DeploymentConfig): Machine {
   const { stateDir, localRequests, paseo, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs } = config
   return { stateDir, localRequests, ...(paseo ? { paseo } : {}), promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs }
 }
-
