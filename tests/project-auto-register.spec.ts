@@ -1,8 +1,9 @@
-import { mkdirSync, readFileSync, realpathSync, statSync } from 'node:fs'
+import { mkdirSync, readFileSync, realpathSync, rmSync, statSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { afterEach, expect, it, vi } from 'vitest'
 import { createProjectManager, type ProjectManager } from '../src/projects/manager.ts'
 import { spawnProjectProcess } from '../src/projects/process.ts'
+import { openProjectCatalog } from '../src/projects/catalog.ts'
 import { createProjectFixture } from './fixtures/projects.ts'
 
 const fixtures: ReturnType<typeof createProjectFixture>[] = [], managers: ProjectManager[] = []
@@ -58,4 +59,21 @@ it('can disable automatic registration', async () => {
   const manager = fixture.create(); await manager.ready
   await expect(manager.resolve(workspace)).rejects.toThrow('PROJECT_NOT_REGISTERED')
   expect(manager.list().map(item => item.id)).toEqual(['alpha'])
+})
+it('starts again after a removed project left a persisted stop intent', async () => {
+  const fixture = setup(), workspace = join(fixture.directory, 'readd')
+  mkdirSync(workspace, { mode: 0o700 })
+  const first = fixture.create(); await first.ready
+  const project = await first.resolve(workspace)
+  await first.ensure(project.id)
+  await first.act(project.id, 'stop')
+  await first.shutdown(3000)
+  await openProjectCatalog(fixture.config.managerDir).remove(project.id)
+  rmSync(project.hostConfig.stateDir, { recursive: true, force: true })
+  const second = fixture.create(); await second.ready
+  const again = await second.resolve(workspace)
+  expect(again.id).toBe(project.id)
+  expect(second.status(again.id).desired).toBe('running')
+  await second.ensure(again.id)
+  expect(second.status(again.id).host.phase).toBe('ready')
 })

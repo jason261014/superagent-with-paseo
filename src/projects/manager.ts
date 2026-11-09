@@ -53,6 +53,8 @@ export function createProjectManager(input: ProjectManagerConfig, options: { pro
     entries.set(id, { version: 0 })
     try { await catalog!.add(definition) }
     catch (error) { registry.remove(id); entries.delete(id); throw error }
+    // A removed project can leave a persisted stop intent under the same deterministic id. Re-registration is a new use.
+    if (intents?.get(id) === 'stopped') await intents.set(id, 'running')
     return project
   }
   const status = (id: string): ProjectSnapshot => {
