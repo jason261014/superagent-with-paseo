@@ -6,7 +6,7 @@
 
 现在本机使用 `managed` 模式。现有实例登记为 `legacy`（显示名 oss-explore），对应原配置仓库 `jason261014/oss-explore`，项目根为 `/Users/anxiaojie/src/oss-explore`。原状态仍是 `/Users/anxiaojie/.dsh/state/sa-paseo-check`，没有迁移数据库或重建原会话。管理目录是 `/Users/anxiaojie/.dsh/state/superagent-manager`。
 
-原 Superagent 对话可以继续使用。新建对话时选择 **Superagent**，cwd 必须位于已登记的 root/aliases；对话随后持久绑定项目，切换窗口或目录不会把旧会话转给其他项目。未登记目录明确报错，不默认进入 legacy。不同 clone 和 worktree 不自动合并，需要显式登记。
+原 Superagent 对话可以继续使用。新建对话时直接选择 **Superagent**：首次使用的 cwd 会自动登记为独立项目，并写入 `<managerDir>/projects.json`；对话随后持久绑定稳定 projectId，切换窗口或目录不会把旧会话转给其他项目。自动登记只继承项目的运行参数（模型、桥接路径等），不复制 GitHub 账号、Policy、Ticket 或数据库。不同 clone 和 worktree 默认按各自路径登记，不自动合并。
 
 ```sh
 cd /Users/anxiaojie/src/superagent-with-paseo
@@ -22,9 +22,11 @@ node bin/superagent-project.mjs --manager-dir /Users/anxiaojie/.dsh/state/supera
 
 Paseo 桌面窗口与 daemon 是不同生命周期。daemon 在线时可继续执行；Paseo v0.15.3 的 `keepRunningAfterQuit` 控制退出桌面后是否停止它托管的 daemon，默认 false。我们没有修改该设置。daemon 真正停止时，插件并行停止项目并保留恢复状态；这不保证任意外部操作或未知后台进程都能被中断，也不把 Ticket 标记为完成。
 
-### 登记新项目
+### 新项目自动登记
 
-在 `paseo-plugin/shared/local-config.ts` 的 managerConfig.projects 增加稳定 id、label、root/aliases、enabled 和独立 hostConfig。示例见 [多项目配置](../paseo-plugin/shared/projects-config.example.ts)。root 与 stateDir 必须已存在，每个项目使用不同状态目录；Node、childEntry、runtimeEntry 和 MCP 路径必须是绝对路径。managed 模式不能同时使用全局 `SUPERAGENT_STATE_DIR`。
+用户不需要编辑 `local-config.ts`。首次在新 workspace 发起 Superagent 对话时，管理器会生成 `auto-<目录名>-<路径哈希>` 形式的稳定 id，在 `projectStateRoot`（默认是 managerDir 同级的 `superagent-projects/<id>`）创建独立 stateDir，并把项目定义持久化到 `<managerDir>/projects.json`。后续消息、重载插件和 daemon 重启都按该 projectId 恢复；同一 workspace 的子目录复用同一个项目。新项目默认不启用 flow-web，避免端口冲突。
+
+`local-config.ts` 的静态 `managerConfig.projects` 仍是高级覆盖入口，用于固定 id、aliases、指定 stateDir 或提前禁用项目；示例见 [多项目配置](../paseo-plugin/shared/projects-config.example.ts)。设置 `autoRegister: false` 可恢复“只接受显式登记”的行为。root 与 stateDir 必须存在且属于当前用户；Node、childEntry、runtimeEntry 和 MCP 路径必须是绝对路径。managed 模式不能同时使用全局 `SUPERAGENT_STATE_DIR`。
 
 登记不会复制另一个项目的账号、Policy 或工具授权，也不自动完成原型 setup。新状态仍需 GitHub repository/agent CLI 配置，可以先通过原 DSH setup 配好、停机后再登记；未完成时显示 needs_setup。不要复制带会话身份和任务的现有数据库来创建第二个项目。
 

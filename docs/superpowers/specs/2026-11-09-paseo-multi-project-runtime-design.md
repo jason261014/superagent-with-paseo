@@ -72,7 +72,7 @@ flowchart TB
 
 ### 登记表
 
-首版使用插件的本地纯数据配置，不新增图形设置页。项目记录包含：
+日常入口不再要求用户编辑 TypeScript：首次在新 Paseo workspace 发起 Superagent 对话时，管理器自动创建项目并持久化到 `<managerDir>/projects.json`。`local-config.ts` 的静态 `projects` 只保留为高级覆盖（固定 id、aliases、指定 stateDir、提前禁用），并可用 `autoRegister: false` 关闭自动登记。auto 项目使用 `auto-<目录名>-<路径哈希>` 作为初始稳定 id，stateDir 默认位于 managerDir 同级的 `superagent-projects/<id>`，flow-web 默认关闭。项目记录包含：
 
 | 字段 | 含义 |
 | --- | --- |
@@ -93,6 +93,8 @@ flowchart TB
 4. root 或 stateDir 缺失、绑定歧义时报告具体错误，不默认为第一个项目；不根据消息文本猜项目。
 5. 项目目录移动通过更新登记关系保持原 id。插件代码目录不自动等于受管项目目录。
 6. `SUPERAGENT_STATE_DIR` 只保留单实例兼容语义；多项目模式拒绝该全局覆盖，避免把所有项目指向同一目录。
+7. 自动登记只继承模板项目的运行参数（Paseo URL、模型、桥接路径、限额），不复制账号、Policy、Tool grant、Ticket 或数据库；新 stateDir 仍走原型 setup，未配置时进入 needs_setup。
+8. 同一真实路径的并发首次打开合并为一次登记；`projects.json` 采用 0600 权限和原子写入，重载插件与 daemon 重启后恢复。
 
 新项目继续接受原型的 deployment/setup 检查。登记目录不等于已完成仓库和账号配置；空状态进入 needs_setup，并说明缺少项。本轮不自动复制现有项目的账号、Policy、tool grant 或数据库，不新增无 GitHub 初始化流程。
 

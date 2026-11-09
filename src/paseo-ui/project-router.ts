@@ -49,7 +49,7 @@ export function createProjectConversationConnection(options: {
       } else if (input.persistence) {
         if (input.persistence.version !== 1 || !options.legacyProjectId) throw new Error('PROJECT_LEGACY_BINDING_REQUIRED')
         projectId = options.legacyProjectId; binding = ConversationBinding.parse(input.persistence.data)
-      } else projectId = options.manager.registry.match(input.config.cwd).id
+      } else projectId = (await options.manager.resolve(input.config.cwd)).id
       const endpoint = await options.manager.ensure(projectId, 5000)
       if (closed || attempt.cancelled) return
       const delegate = connection(endpoint)

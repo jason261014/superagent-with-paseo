@@ -1,11 +1,12 @@
-import { randomUUID } from 'node:crypto'
-import { lstatSync, mkdirSync } from 'node:fs'
-import { join } from 'node:path'
+import { createHash, randomUUID } from 'node:crypto'
+import { existsSync, lstatSync, mkdirSync, realpathSync } from 'node:fs'
+import { basename, dirname, join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { lockSync } from 'proper-lockfile'
 import { waitForHostStop, type HostStatus, type HostStop } from '../hosts/lifecycle.ts'
-import { parseProjectManagerConfig, type ProjectManagerConfig } from './config.ts'
-import { createProjectRegistry, type ProjectRegistry } from './registry.ts'
+import { parseProjectManagerConfig, type ProjectDefinition, type ProjectManagerConfig } from './config.ts'
+import { createProjectRegistry, type ProjectRegistry, type RegisteredProject } from './registry.ts'
+import { openProjectCatalog, type ProjectCatalog } from './catalog.ts'
 import { openProjectIntents, type ProjectIntents } from './intents.ts'
 import { spawnProjectProcess, type ProjectProcess, type ProjectProcessFactory } from './process.ts'
 import { listenProjectManagement } from './management.ts'
@@ -17,6 +18,7 @@ export interface ProjectManager {
   registry: ProjectRegistry
   list(): ProjectSnapshot[]
   status(id: string): ProjectSnapshot
+  resolve(cwd: string): Promise<RegisteredProject>
   ensure(id: string, budgetMs?: number): Promise<ProjectEndpoint>
   act(id: string, action: ProjectAction): Promise<ProjectActionResult>
   shutdown(budgetMs?: number): Promise<HostStop>
@@ -36,6 +38,23 @@ export function createProjectManager(input: ProjectManagerConfig, options: { pro
   let listener: { close(): Promise<void> } | undefined
   let closing = false, finalStop: Promise<void> | undefined, ready: Promise<void>
   const cancelled = new AbortController()
+  const projectStateRoot = config.projectStateRoot ?? join(dirname(config.managerDir), 'superagent-projects')
+  const registering = new Map<string, Promise<RegisteredProject>>()
+  let catalog: ProjectCatalog | undefined
+  const autoProject = async (root: string): Promise<RegisteredProject> => {
+    const template = config.projects.find(project => project.id === config.legacyProjectId) ?? config.projects[0]!
+    const id = projectIdFor(root, registry), stateDir = join(projectStateRoot, id)
+    mkdirSync(projectStateRoot, { recursive: true, mode: 0o700 })
+    if (!existsSync(stateDir)) mkdirSync(stateDir, { mode: 0o700 })
+    const { stateDir: _stateDir, workspaceDir: _workspaceDir, flowWeb: _flowWeb, ...hostDefaults } = template.hostConfig
+    const definition: ProjectDefinition = { id, label: basename(root) || 'workspace', root, aliases: [], enabled: true,
+      hostConfig: { ...hostDefaults, stateDir } }
+    const project = registry.add(definition)
+    entries.set(id, { version: 0 })
+    try { await catalog!.add(definition) }
+    catch (error) { registry.remove(id); entries.delete(id); throw error }
+    return project
+  }
   const status = (id: string): ProjectSnapshot => {
     const project = registry.get(id), entry = entries.get(id)!
     return { id, label: project.label, enabled: project.enabled, desired: intents?.get(id) ?? 'dormant',
@@ -75,6 +94,19 @@ export function createProjectManager(input: ProjectManagerConfig, options: { pro
   const manager: ProjectManager = {
     get ready() { return ready }, registry,
     list: () => registry.list().map(project => status(project.id)), status,
+    async resolve(cwd) {
+      await ready
+      if (closing) throw new Error('PROJECT_MANAGER_STOPPING')
+      try { return registry.match(cwd) }
+      catch (error) { if (!(error instanceof Error) || error.message !== 'PROJECT_NOT_REGISTERED') throw error }
+      if (!config.autoRegister) throw new Error('PROJECT_NOT_REGISTERED')
+      const actual = realpathSync(cwd)
+      const pending = registering.get(actual)
+      if (pending) return pending
+      const work = autoProject(actual)
+      registering.set(actual, work)
+      try { return await work } finally { registering.delete(actual) }
+    },
     async ensure(id, budgetMs = 5000) {
       if (!Number.isFinite(budgetMs) || budgetMs < 0) throw new Error('PROJECT_INVALID_BUDGET')
       const work = (async () => {
@@ -146,12 +178,27 @@ export function createProjectManager(input: ProjectManagerConfig, options: { pro
     }
     if (closing) return
     intents = openProjectIntents(config.managerDir)
+    catalog = openProjectCatalog(config.managerDir)
+    for (const definition of catalog.list()) {
+      if (registry.list().some(project => project.id === definition.id || project.root === definition.root)) continue
+      try { const project = registry.add(definition); entries.set(project.id, { version: 0 }) }
+      catch (error) { console.error('Superagent project skipped:', definition.id, error instanceof Error ? error.message : String(error)) }
+    }
     listener = await listenProjectManagement(manager, config.managerDir)
     if (closing) return
     for (const project of registry.list()) if (project.enabled && intents.get(project.id) === 'running') void launch(project.id).catch(() => {})
   })()
   void ready.catch(() => { void manager.shutdown().catch(() => {}) })
   return manager
+}
+
+function projectIdFor(root: string, registry: ProjectRegistry): string {
+  const slug = basename(root).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'workspace'
+  const hash = createHash('sha256').update(root).digest('hex').slice(0, 8)
+  for (let index = 1; ; index++) {
+    const id = index === 1 ? `auto-${slug}-${hash}` : `auto-${slug}-${hash}-${index}`
+    try { registry.get(id) } catch { return id }
+  }
 }
 
 async function within<Value>(work: Promise<Value>, budgetMs: number): Promise<Value> {

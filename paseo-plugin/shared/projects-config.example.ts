@@ -4,6 +4,8 @@ export const managerConfig = {
   nodeExecutable: '/absolute/path/to/node',
   childEntry: '/absolute/superagent-with-paseo/lib/paseo-project-child.js',
   runtimeEntry: '/absolute/superagent-with-paseo/lib/paseo-host.js',
+  autoRegister: true,
+  projectStateRoot: '/absolute/private/superagent-projects',
   projects: [
     {
       id: 'alpha', label: 'Alpha', root: '/absolute/projects/alpha', aliases: [], enabled: true,

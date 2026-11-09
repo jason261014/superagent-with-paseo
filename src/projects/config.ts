@@ -13,6 +13,7 @@ export const ProjectManagerConfigSchema = z.strictObject({
   managerDir: AbsolutePathSchema, nodeExecutable: AbsolutePathSchema,
   childEntry: AbsolutePathSchema, runtimeEntry: AbsolutePathSchema,
   legacyProjectId: ProjectIdSchema.optional(), projects: z.array(ProjectDefinitionSchema).min(1),
+  autoRegister: z.boolean().default(true), projectStateRoot: AbsolutePathSchema.optional(),
 })
 export type ProjectDefinition = z.input<typeof ProjectDefinitionSchema>
 export type ProjectManagerConfig = z.input<typeof ProjectManagerConfigSchema>

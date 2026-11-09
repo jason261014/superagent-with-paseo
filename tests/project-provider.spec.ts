@@ -30,6 +30,7 @@ function setup() {
   }
   const manager = {
     registry: { match: (cwd: string) => ({ id: cwd.slice(1) }) },
+    resolve: vi.fn(async (cwd: string) => ({ id: cwd.slice(1) })),
     ensure: vi.fn(async (id: string) => ({ projectId: id, stateDir: '/' + id, status: () => ({ phase: 'ready' as const }) })),
     shutdown: vi.fn(), act: vi.fn(),
   } as unknown as ProjectManager

@@ -296,7 +296,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/hosts/paseo.ts` | Validated standalone Paseo host, startup cancellation and lock waiting |
 | `src/hosts/lifecycle.ts` | Host status and bounded waiting without releasing live resources |
 | `src/hosts/paseo-config.ts` | Data-only standalone host configuration |
-| `src/projects/config.ts`, `registry.ts` | Project registration, canonical paths and configuration modes |
+| `src/projects/config.ts`, `registry.ts`, `catalog.ts` | Project registration, canonical paths, durable auto-registration catalog and configuration modes |
 | `src/projects/protocol.ts`, `child.ts`, `process.ts` | Private project process protocol, standalone entry and owned child lifecycle |
 | `src/projects/intents.ts`, `manager.ts`, `management.ts`, `cli.ts`, `index.ts` | Durable running intent, project process ownership and private management control |
 | `src/paseo-ui/project-router.ts` | Durable project-bound provider sessions with legacy restoration |
@@ -446,6 +446,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | --- | --- |
 | `tests/host-boundaries.spec.ts` | DSH-free runtime dependency boundary |
 | `tests/project-registry.spec.ts` | Canonical project registration, disabled roots and ownership conflicts |
+| `tests/project-auto-register.spec.ts` | First-use workspace registration, catalog persistence and restart recovery |
 | `tests/project-process.spec.ts` | Real per-project process environments, bounded cleanup and parent disconnection |
 | `tests/project-manager.spec.ts` | Demand coalescing, persistent manual stop, restoration and shutdown races |
 | `tests/project-management.spec.ts` | Private project control and CLI without database access |
