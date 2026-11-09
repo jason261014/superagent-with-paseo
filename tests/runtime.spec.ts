@@ -1050,7 +1050,15 @@ it('reports each setup problem where the operator fixes it, and checks the agent
   // git older than 2.32 ignores GIT_CONFIG_GLOBAL and reads the operator's configuration.
   answers = { ...valid, [HELPERS]: 'file:/home/me/.gitconfig\0!gh auth git-credential\0' }
   await needs('deployment', 'gitTooOld', {})
-  await needs('github', 'repositoryUnset', {}, { github: { repository: '' } })
+  const local = await restart({}, { github: { repository: '' } })
+  await local.ready
+  expect(local.configured()).toBe(true)
+  expect(local.setupProblem).toBeUndefined()
+  expect(local.deployment).toMatchObject({ repository: '', local: true, github: { cli: '', login: 'local', noreply: 'local@localhost' } })
+  expect(local.health.runtime).toMatchObject({ state: 'ready' })
+  expect(readFileSync(join(directory, 'worker-gitconfig'), 'utf8')).toContain('email = local@localhost')
+  expect(readFileSync(join(directory, 'worker-bin', 'gh'), 'utf8')).toContain('gh is unavailable')
+  expect(Object.keys(local.prompts.preview(local.prompts.current().config).skills)).not.toContain('github')
   // A broken Feishu bot leaves Feishu out and says why; GitHub work goes on.
   answers = { ...valid, [`${BOT()} config strict-mode`]: 'strict-mode: off (source: profile)' }
   const next = await restart()

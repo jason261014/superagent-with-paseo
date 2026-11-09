@@ -92,6 +92,21 @@ export class Runtime implements SourceHost {
     try {
       const report = (error: unknown) => { host.logger.warn('dsh-superagent: %s', String(error)) }
       const store = opened = this.store = new Store(join(machine.stateDir, 'orchestrator.sqlite'), report)
+      if (machine.localEntry) {
+        const settings = store.settings()
+        if (!settings.sources.local) {
+          const uid = `uid:${process.getuid?.() ?? 0}`
+          const workspace = machine.workspaceDir
+          const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`
+          const prepare = workspace
+            ? `if git -C ${quote(workspace)} rev-parse --git-dir >/dev/null 2>&1; then git -C ${quote(workspace)} worktree add --detach "$DSH_SUPERAGENT_DIR" HEAD; fi`
+            : undefined
+          store.saveSettings({ ...settings,
+            sources: { ...settings.sources, local: { enabled: true, config: { acceptRequests: true } } },
+            policy: { ...settings.policy, sources: { ...settings.policy.sources, local: { allowed: [{ id: uid }], admission: {} } } },
+            ...prepare ? { executor: { ...settings.executor, prepare } } : {} })
+        }
+      }
       if (host.runId) {
         const previous = store.get(KV.host.lifecycle)
         if (previous && previous.phase !== 'stopped') host.logger.warn('Superagent is recovering after an unfinished host shutdown')
@@ -101,7 +116,8 @@ export class Runtime implements SourceHost {
       const deployed = () => setup.configured()
         ? environmentOf({ deployment: setup.deployment, sources: this.sources, settings: store.settings() }) : undefined
       const feishu = () => setup.configured() && !!setup.deployment.feishu
-      const prompts = this.prompts = new Prompts(store, () => machine.promptMaxChars.get(), deployed, feishu)
+      const prompts = this.prompts = new Prompts(store, () => machine.promptMaxChars.get(), deployed, feishu,
+        () => setup.configured() && !!setup.deployment.repository)
       const masterId = this.masterId = store.get(KV.runtime.masterId) ?? `orchestrator-${key(machine.stateDir)}`
       store.set(KV.runtime.masterId, masterId)
       const commands = this.commands = new Commands(() => setup.deployment, setup.commandEnvironment, this.lifetime)

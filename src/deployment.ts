@@ -13,6 +13,8 @@ export interface Machine {
   stateDir: string
   workspaceDir?: string
   localRequests?: boolean
+  /** The Paseo provider is the local user entry point, so a fresh state enables the local Source. */
+  localEntry?: boolean
   paseo?: PaseoConfig
   promptMaxChars: { get(): number }
   admissionContextMaxPages: { get(): number }
@@ -29,6 +31,8 @@ export const SETUP_FIELDS: Readonly<Record<string, readonly string[]>> = { githu
 export interface Deployment extends Machine {
   repository: string
   github: { cli: string; login: string; noreply: string }
+  /** True when no GitHub repository is configured and the runtime only works in the local workspace. */
+  local: boolean
   feishu?: FeishuBot
 }
 export interface FeishuBot { cli: string; appId: string; brand: 'feishu' | 'lark'; botId: string; name: string }
@@ -78,7 +82,12 @@ export async function resolveDeployment(machine: Machine, github: unknown, probe
   if (!access) throw new SetupError('repositoryUnreported', { repository: remote })
   const repository = access.name
   if (access.push !== true) throw new SetupError('repositoryReadOnly', { account: agent.login, repository })
-  return { ...machine, repository, github: { cli, login: agent.login, noreply: `${agent.id}+${agent.login}@users.noreply.github.com` } }
+  return { ...machine, repository, local: false, github: { cli, login: agent.login, noreply: `${agent.id}+${agent.login}@users.noreply.github.com` } }
+}
+
+/** A deployment without GitHub: the orchestrator and workers remain usable inside the workspace itself. */
+export function localDeployment(machine: Machine): Deployment {
+  return { ...machine, repository: '', local: true, github: { cli: '', login: 'local', noreply: 'local@localhost' } }
 }
 
 const AuthStatus = z.object({ appId: z.string().regex(/^cli_[A-Za-z0-9]+$/), brand: z.enum(['feishu', 'lark']).default('feishu'), identities: z.object({ bot: z.object({ status: z.string() }) }) })

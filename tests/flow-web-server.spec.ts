@@ -6,6 +6,7 @@ import { afterEach, expect, it } from 'vitest'
 import { createPaseoHost, type HostConfig } from '../src/hosts/paseo.ts'
 import type { PaseoHost } from '../src/hosts/lifecycle.ts'
 import { startFlowWebServer, type FlowWebServer } from '../src/flow-web/server.ts'
+import { fakePaseoAdapter } from './fixtures/paseo-adapter.ts'
 
 const dirs: string[] = [], servers: FlowWebServer[] = [], hosts: PaseoHost[] = []
 afterEach(async () => {
@@ -83,10 +84,10 @@ it('mounts the flow web server through createPaseoHost and closes it before rele
     paseo: { url: 'ws://127.0.0.1:6767/ws', orchestrator: 'codex', worker: 'codex',
       orchestratorMode: 'read-only', workerMode: 'read-only', bridgeNode: process.execPath,
       bridgeCommand: '/Users/anxiaojie/src/superagent-with-paseo/bin/superagent-mcp.mjs' } }
-  const host = createPaseoHost(config)
+  const host = createPaseoHost(config, { createAdapter: () => fakePaseoAdapter() })
   hosts.push(host)
   await host.ready
-  expect(host.status().phase).toBe('needs_setup')
+  expect(host.status().phase).toBe('ready')
   const url = host.flowWeb?.()
   expect(url).toMatch(/^http:\/\/127\.0\.0\.1:/)
   const metadata = JSON.parse(await import('node:fs').then(fs => fs.readFileSync(join(dir, 'flow-web', 'access.json'), 'utf8'))) as { token: string; url: string }
@@ -94,7 +95,7 @@ it('mounts the flow web server through createPaseoHost and closes it before rele
   const response = await fetch(`${url}/api/flow/overview`, { headers: { authorization: `Bearer ${metadata.token}` } })
   expect(response.status).toBe(200)
   const body = await response.json() as { host: { phase: string }; counts: { totalItems: number } }
-  expect(body.host.phase).toBe('needs_setup')
+  expect(body.host.phase).toBe('ready')
   expect(body.counts.totalItems).toBe(0)
   await expect(host.stop(2000)).resolves.toEqual({ closed: true })
   expect(existsSync(join(dir, 'orchestrator.sqlite'))).toBe(true)

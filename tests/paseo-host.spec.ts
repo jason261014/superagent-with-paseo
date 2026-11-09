@@ -7,22 +7,28 @@ import type { PaseoHost } from '../src/hosts/lifecycle.ts'
 import { Store } from '../src/app/store.ts'
 import { KV } from '../src/kv.ts'
 import { localCall } from '../src/local/transport.ts'
+import { fakePaseoAdapter } from './fixtures/paseo-adapter.ts'
 
 const hosts: PaseoHost[] = [], dirs: string[] = []
 afterEach(async () => { for (const host of hosts.splice(0)) await host.stop(2000); for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }) })
 function config(): HostConfig {
   const stateDir = mkdtempSync(join(tmpdir(), 'sa-host-')); dirs.push(stateDir)
-  return { stateDir, paseo: { url: 'ws://127.0.0.1:6767/ws', orchestrator: 'codex', worker: 'codex',
+  return { stateDir, workspaceDir: stateDir, paseo: { url: 'ws://127.0.0.1:6767/ws', orchestrator: 'codex', worker: 'codex',
     orchestratorMode: 'read-only', workerMode: 'read-only', bridgeNode: process.execPath, bridgeCommand: resolve('bin/superagent-mcp.mjs') } }
 }
 function host(value: HostConfig, options: Parameters<typeof createPaseoHost>[1] = {}) {
-  const result = createPaseoHost(value, options); hosts.push(result); return result
+  const result = createPaseoHost(value, { createAdapter: () => fakePaseoAdapter(), ...options }); hosts.push(result); return result
 }
-it('boots without DSH, exposes needs_setup, preserves the database, and releases its lock only after stop', async () => {
+it('boots without DSH in local mode, preserves the database, and releases its lock only after stop', async () => {
   const c = config(), first = host(c)
   await first.ready
-  expect(first.status().phase).toBe('needs_setup')
-  expect(await localCall(c.stateDir, 'GET', '/status')).toMatchObject({ configured: false, accepting: false })
+  expect(first.status().phase).toBe('ready')
+  expect(await localCall(c.stateDir, 'GET', '/status')).toMatchObject({ configured: true, accepting: true })
+  const initial = new Store(join(c.stateDir, 'orchestrator.sqlite'))
+  expect(initial.settings().sources.local).toMatchObject({ enabled: true, config: { acceptRequests: true } })
+  expect(initial.settings().policy.sources.local?.allowed).toEqual([{ id: `uid:${process.getuid?.() ?? 0}` }])
+  expect(initial.settings().executor.prepare).toContain('worktree add --detach')
+  initial.close()
   expect(existsSync(c.stateDir + '.lock')).toBe(true)
   await expect(first.stop()).resolves.toEqual({ closed: true })
   const store = new Store(join(c.stateDir, 'orchestrator.sqlite'))
@@ -58,5 +64,5 @@ it('waits for the old host and cancels that wait without touching the current lo
   expect(existsSync(c.stateDir + '.lock')).toBe(true)
   await first.stop()
   const last = host(c); await last.ready
-  expect(last.status().phase).toBe('needs_setup')
+  expect(last.status().phase).toBe('ready')
 })

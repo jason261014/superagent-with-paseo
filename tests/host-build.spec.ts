@@ -66,10 +66,17 @@ it('boots the built host from another cwd with DSH resolution denied and reopens
     import { DatabaseSync } from 'node:sqlite';
     import { createPaseoHost } from ${JSON.stringify(pathToFileURL(join(directory, 'paseo-host.js')).href)};
     const config = ${JSON.stringify(config)};
+    const adapter = { create: async input => ({ agentId: 'agent-orchestrator', cwd: input.cwd }), send: async () => {},
+      findByLabels: async () => ({ kind: 'complete', matches: [] }), findMessage: async () => ({ kind: 'absent_confirmed', epoch: 'test' }),
+      timeline: async () => ({ kind: 'complete', epoch: 'test', entries: [] }),
+      snapshot: async agentId => ({ agentId, cwd: null, status: 'idle', activeTurn: null, pendingPermissions: [],
+        observedAt: new Date().toISOString(), unknownChildren: true }),
+      interrupt: async () => ({ requestSent: true, runtime: null }), archive: async () => ({ archivedAt: new Date().toISOString() }),
+      close: async () => {} };
     let masterId;
     for (let attempt = 0; attempt < 2; attempt++) {
-      const host = createPaseoHost(config);
-      try { await host.ready; assert.equal(host.status().phase, 'needs_setup'); }
+      const host = createPaseoHost(config, { createAdapter: () => adapter });
+      try { await host.ready; assert.equal(host.status().phase, 'ready'); }
       finally { assert.deepEqual(await host.stop(2000), { closed: true }); }
       assert.equal(existsSync(config.stateDir + '.lock'), false);
       const db = new DatabaseSync(config.stateDir + '/orchestrator.sqlite', { readOnly: true });

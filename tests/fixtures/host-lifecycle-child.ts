@@ -2,11 +2,11 @@
 import { Runtime } from '../../src/app/runtime.ts'
 import { createPaseoBackend } from '../../src/paseo/backend.ts'
 import { waitForHostStop } from '../../src/hosts/lifecycle.ts'
-import type { PaseoAdapter } from '../../src/paseo/client.ts'
+import { fakePaseoAdapter } from './paseo-adapter.ts'
 
 const stateDir = process.argv[2]!
 const runtime = new Runtime({ runId: 'test-child', logger: console, runWorker: async () => '',
-  backend: services => createPaseoBackend(services, () => ({ close: async () => {} } as PaseoAdapter)),
+  backend: services => createPaseoBackend(services, () => fakePaseoAdapter()),
   modelCatalog: async () => { throw new Error('Unused catalog') }, validateModel: async () => { throw new Error('Unused model') },
 }, { stateDir, promptMaxChars: { get: () => 100000 }, admissionContextMaxPages: { get: () => 10 }, admissionContextTimeoutMs: { get: () => 15000 },
   paseo: { url: 'ws://127.0.0.1:6767/ws', orchestrator: 'codex', worker: 'codex',

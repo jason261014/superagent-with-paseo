@@ -28,7 +28,13 @@ Paseo 桌面窗口与 daemon 是不同生命周期。daemon 在线时可继续�
 
 `local-config.ts` 的静态 `managerConfig.projects` 仍是高级覆盖入口，用于固定 id、aliases、指定 stateDir 或提前禁用项目；示例见 [多项目配置](../paseo-plugin/shared/projects-config.example.ts)。设置 `autoRegister: false` 可恢复“只接受显式登记”的行为。root 与 stateDir 必须存在且属于当前用户；Node、childEntry、runtimeEntry 和 MCP 路径必须是绝对路径。managed 模式不能同时使用全局 `SUPERAGENT_STATE_DIR`。
 
-登记不会复制另一个项目的账号、Policy 或工具授权，也不自动完成原型 setup。新状态仍需 GitHub repository/agent CLI 配置，可以先通过原 DSH setup 配好、停机后再登记；未完成时显示 needs_setup。不要复制带会话身份和任务的现有数据库来创建第二个项目。
+登记不会复制另一个项目的账号、Policy 或工具授权。新状态默认走 workspace-first 本地模式：没有 GitHub repository 也能启动协调者、接 Paseo 消息并在 workspace 内执行；GitHub skill 和 `gh` 会明确不可用，涉及 PR/Issue 的能力需要之后再配置 GitHub。不要复制带会话身份和任务的现有数据库来创建第二个项目。
+
+### 本地模式与 GitHub 模式
+
+项目 stateDir 首次启动时，如果没有配置 `sources.github.repository`，Runtime 使用本地身份 `local <local@localhost>`，并自动启用当前 OS 用户的 local source（`acceptRequests: true` 和 `uid:<uid>` 允许名单）。如果项目根是 Git 仓库，新 Ticket 的 prepare 默认用 `git worktree add --detach "$DSH_SUPERAGENT_DIR" HEAD` 建隔离工作区；非 Git 目录仍可对话，但没有自动工作区。
+
+在设置里配置 GitHub repository 和 agent CLI 后，下一次启动会恢复 GitHub 校验、GitHub skill、`gh` 凭据和 PR 能力。GitHub 配置存在但 CLI/账号不可用时仍会停在 needs_setup，不会静默退回本地模式。
 
 项目画布仍由该项目 Runtime 管理；现有项目保留端口 17890。新项目默认不启用，启用时使用不同的非零端口，或 port=0 让 OS 分配。实际 URL 从 project status 读取。各项目日志位于 `<managerDir>/logs/<id>.log`，当前文件最多 1MiB 并保留一份轮转。
 

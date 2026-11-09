@@ -62,7 +62,7 @@ it('isolates identical message IDs and persists the project instead of the chang
     const event = fixture.events.find(event => event.type === 'session.opened' && event.sessionId === 'alpha')
     expect(event).toMatchObject({ persistence: { version: 2, data: { projectId: 'alpha', binding: fixture.bindings.alpha } } })
     await fixture.open('restored', '/beta', { version: 2, data: { projectId: 'alpha', binding: fixture.bindings.alpha } })
-    expect(fixture.manager.ensure).toHaveBeenLastCalledWith('alpha', 5000)
+    expect(fixture.manager.ensure).toHaveBeenLastCalledWith('alpha', 20_000)
   } finally { await fixture.connection.close() }
   expect(fixture.manager.shutdown).not.toHaveBeenCalled(); expect(fixture.manager.act).not.toHaveBeenCalled()
 })

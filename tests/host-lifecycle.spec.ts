@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { createPaseoHost } from '../src/hosts/paseo.ts'
 import { Store } from '../src/app/store.ts'
+import { fakePaseoAdapter } from './fixtures/paseo-adapter.ts'
 it('reports deadline without completing or releasing the underlying resources', async () => {
   vi.useFakeTimers()
   try {
@@ -44,7 +45,7 @@ it('keeps SQLite ownership across a timed-out stop until a real child effect has
     expect(existsSync(stateDir + '.lock')).toBe(false)
     const store = new Store(join(stateDir, 'orchestrator.sqlite'))
     expect(store.get('late-effect-write')).toBe('complete'); store.close()
-    const successor = createPaseoHost(config); await successor.ready; await successor.stop()
+    const successor = createPaseoHost(config, { createAdapter: () => fakePaseoAdapter() }); await successor.ready; await successor.stop()
   } finally {
     if (child.exitCode === null) { const exited = once(child, 'exit'); child.kill('SIGKILL'); await exited }
     rmSync(stateDir, { recursive: true, force: true })

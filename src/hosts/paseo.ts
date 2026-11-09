@@ -46,7 +46,7 @@ export function createPaseoHost(config: HostConfig, options: PaseoHostOptions = 
           backend: services => (backendRef = createPaseoBackend(services, options.createAdapter)),
           modelCatalog: async () => ({ default: { provider: parsed.paseo.orchestrator.split('/')[0]!, model: parsed.paseo.orchestrator.split('/').slice(1).join('/') }, routableProviders: [], groups: [], failures: [] }),
           validateModel: async () => { throw new Error('Configure role models in the Paseo plugin host configuration') },
-        }, { stateDir: parsed.stateDir, workspaceDir: parsed.workspaceDir, paseo: parsed.paseo, localRequests: true,
+        }, { stateDir: parsed.stateDir, workspaceDir: parsed.workspaceDir, paseo: parsed.paseo, localRequests: true, localEntry: true,
           promptMaxChars: { get: () => parsed.promptMaxChars },
           admissionContextMaxPages: { get: () => parsed.admissionContextMaxPages },
           admissionContextTimeoutMs: { get: () => parsed.admissionContextTimeoutMs },
