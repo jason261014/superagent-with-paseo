@@ -37,10 +37,11 @@ export function buildStopArgs(authority: string, agentId: string, confirmedId: s
 
 export interface PaseoAdapterOptions {
   url: string
+  lifetime?: AbortSignal
   password?: string
   binary?: string
   createClient?: typeof createPaseoClient
-  exec?: (file: string, args: string[], options: { timeout: number; shell: false }) => Promise<unknown>
+  exec?: (file: string, args: string[], options: { timeout: number; shell: false; signal?: AbortSignal }) => Promise<unknown>
 }
 export interface LabelMatch { agentId: string; cwd: string | null; labels: Record<string, string> }
 export type LabelLookup = { kind: 'complete'; matches: LabelMatch[] } | { kind: 'unknown'; matches: LabelMatch[]; reason: string }
@@ -65,7 +66,7 @@ export interface PaseoAdapter {
   findMessage(agentId: string, messageId: string): Promise<MessageLookup>
   timeline(agentId: string): Promise<TimelineLookup>
   snapshot(agentId: string): Promise<RuntimeSnapshot>
-  interrupt(agentId: string): Promise<{ requestSent: true | null; runtime: RuntimeSnapshot | null }>
+  interrupt(agentId: string, signal?: AbortSignal): Promise<{ requestSent: true | null; runtime: RuntimeSnapshot | null }>
   archive(agentId: string): Promise<{ archivedAt: string }>
   close(): Promise<void>
 }
@@ -86,14 +87,23 @@ export function createPaseoAdapter(options: PaseoAdapterOptions): PaseoAdapter {
   const knownAgents = new Set<string>()
   let client: PaseoClient | undefined
   let connecting: Promise<PaseoClient> | undefined
+  let pendingClient: PaseoClient | undefined
+  let closed = false
+  let closing: Promise<void> | undefined
 
   async function connected(): Promise<PaseoClient> {
+    if (closed) throw fail('PASEO_CLOSED')
     if (connecting) return connecting
+    options.lifetime?.throwIfAborted()
     const pending = createClient({ url: options.url, ...(options.password ? { password: options.password } : {}),
       reconnect: { enabled: true, baseDelayMs: 1000, maxDelayMs: 30000 } })
+    pendingClient = pending
+    const abort = () => { void pending.close().catch(() => {}) }
+    options.lifetime?.addEventListener('abort', abort, { once: true })
     connecting = (async () => {
-      try { await pending.connect(); client = pending; return pending }
+      try { await pending.connect(); if (closed) throw fail('PASEO_CLOSED'); options.lifetime?.throwIfAborted(); client = pending; return pending }
       catch (error) { await pending.close().catch(() => {}); connecting = undefined; throw error }
+      finally { options.lifetime?.removeEventListener('abort', abort) }
     })()
     return connecting
   }
@@ -239,12 +249,12 @@ export function createPaseoAdapter(options: PaseoAdapterOptions): PaseoAdapter {
     },
 
     snapshot,
-    async interrupt(agentId: string) {
+    async interrupt(agentId: string, signal?: AbortSignal) {
       assertId(agentId)
       if (!knownAgents.has(agentId)) throw fail('UNKNOWN_AGENT')
       const args = buildStopArgs(authority, agentId, agentId)
       let requestSent: true | null = null
-      try { await exec(binary, args, { timeout: 10_000, shell: false }); requestSent = true } catch { /* the request may have reached the daemon */ }
+      try { await exec(binary, args, { timeout: 10_000, shell: false, ...(signal ? { signal } : {}) }); requestSent = true } catch { /* the request may have reached the daemon */ }
       const runtime = await snapshot(agentId).catch(() => null)
       return { requestSent, runtime }
     },
@@ -253,11 +263,14 @@ export function createPaseoAdapter(options: PaseoAdapterOptions): PaseoAdapter {
       if (!knownAgents.has(agentId)) throw fail('UNKNOWN_AGENT')
       return (await connected()).agents.ref(agentId).archive()
     },
-    async close() {
-      // Await a pending connection before closing, so it cannot leak after close returns.
-      const active = client ?? await connecting?.catch(() => undefined)
-      if (active) await active.close()
-      client = undefined; connecting = undefined; knownAgents.clear()
+    close() {
+      closed = true
+      return closing ??= (async () => {
+        // Close first to reject a pending connect/request, then wait for it to settle.
+        await (client ?? pendingClient)?.close()
+        await connecting?.catch(() => undefined)
+        client = undefined; pendingClient = undefined; connecting = undefined; knownAgents.clear()
+      })()
     },
   }
 }

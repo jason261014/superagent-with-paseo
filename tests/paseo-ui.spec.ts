@@ -7,6 +7,7 @@ import { createConversationConnection } from '../src/paseo-ui/connection.ts'
 import { pendingInputs } from '../src/paseo-ui/pending.ts'
 import type { PendingInputs } from '../src/paseo-ui/pending.ts'
 import type { ConversationTransport } from '../src/paseo-ui/transport.ts'
+import type { HostStatus } from '../src/hosts/lifecycle.ts'
 import { ConversationBinding, conversationRequestId, conversationTextHash, type ConversationInput,
   type ConversationEvent, type ConversationReceiptView } from '../src/local/protocol.ts'
 
@@ -14,7 +15,7 @@ const binding = ConversationBinding.parse({ version: 1, hostId: 'a'.repeat(32), 
 const connections: ProviderConnection[] = [], dirs: string[] = []
 afterEach(async () => { for (const connection of connections.splice(0)) await connection.close(); vi.useRealTimers(); for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }) })
 const config = { cwd: '/tmp', env: {}, mcpServers: {}, settings: {}, persist: true }
-function setup() {
+function setup(hostStatus?: () => HostStatus) {
   const intents = new Map<string, ConversationInput>(), receipts = new Map<string, ConversationReceiptView>(), rows: ConversationEvent[] = []
   const pending: PendingInputs = {
     put(input) { const id = input.clientMessageId, old = intents.get(id); if (old && old.text !== input.text) throw new Error('LOCAL_REQUEST_CONFLICT'); intents.set(id, input) },
@@ -33,7 +34,7 @@ function setup() {
     receipt: vi.fn(async id => ({ binding, receipt: receipts.get(id) ?? null })),
     events: vi.fn(async (after, through = rows.length) => ({ binding, items: rows.slice(after, through), nextCursor: through, highWater: through, hasMore: false })),
   }
-  const connection = createConversationConnection({ transport, pending, capabilities: ['prompt.message', 'session.persistence', 'session.can_stop_runtime'], pollMs: 10 })
+  const connection = createConversationConnection({ transport, pending, capabilities: ['prompt.message', 'session.persistence', 'session.can_stop_runtime'], pollMs: 10, hostStatus })
   connections.push(connection)
   const events: ProviderEvent[] = []; connection.onEvent(event => events.push(event))
   const open = (persistence?: { version: number; data: Record<string, unknown> }) => connection.send({ type: 'session.open', requestId: 'open', sessionId: 'ui',
@@ -43,6 +44,38 @@ function setup() {
   return { transport, pending, rows, receipts, intents, events, connection, open, send }
 }
 const items = (events: ProviderEvent[]) => events.filter((event): event is Extract<ProviderEvent, { type: 'timeline.item' }> => event.type === 'timeline.item')
+
+it('restores a managed conversation when rolling back to the same single host', async () => {
+  const fixture = setup()
+  await fixture.open({ version: 2, data: { projectId: 'legacy', binding } })
+  expect(fixture.events).toContainEqual(expect.objectContaining({ type: 'session.opened',
+    persistence: { version: 1, data: binding } }))
+  const other = setup()
+  await other.open({ version: 2, data: { projectId: 'legacy', binding: { ...binding, hostId: 'c'.repeat(32) } } })
+  expect(other.events).toContainEqual(expect.objectContaining({ type: 'request.failed',
+    error: { message: 'LOCAL_CONVERSATION_MISMATCH' } }))
+  expect(other.transport.submit).not.toHaveBeenCalled()
+})
+
+it.each([
+  ['starting', '正在启动'], ['needs_setup', '需要完成配置'], ['stopping', '正在停止'], ['stopped', '已停止'], ['error', '启动失败'],
+] as const)('reports the %s host before opening or accepting input', async (phase, text) => {
+  let status: HostStatus = { phase, detail: 'test host state' }
+  const h = setup(() => status)
+  await h.open()
+  expect(h.transport.binding).not.toHaveBeenCalled()
+  expect(h.events).toContainEqual(expect.objectContaining({ type: 'request.failed', error: { message: expect.stringContaining(text) } }))
+  status = { phase: 'ready' }
+  await h.open()
+  status = { phase, detail: 'test host state' }
+  await h.send()
+  expect(h.transport.submit).not.toHaveBeenCalled()
+  expect(h.intents.size).toBe(0)
+  expect(h.events).toContainEqual(expect.objectContaining({ type: 'session.prompt_result', result: { type: 'failed', error: { message: expect.stringContaining(text) } } }))
+  status = { phase: 'ready' }
+  await h.send()
+  expect(h.rows).toHaveLength(1)
+})
 
 it('completes input after durable receipt and emits a later reply without another model turn', async () => {
   vi.useFakeTimers()

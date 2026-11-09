@@ -1,17 +1,8 @@
-/** Application composition root and lifecycle manager for dsh-superagent. */
-import { Service, type Context } from '@deepseek-ai/cordis'
-import type { Agent } from '@deepseek-ai/dsh-agent'
-import type { SessionId } from '@deepseek-ai/dsh-session'
-import type {} from '@deepseek-ai/dsh-api-session-controller'
-import type {} from '@deepseek-ai/dsh-session-persistence'
-import type {} from '@deepseek-ai/dsh-workspace'
-import type {} from '@deepseek-ai/dsh-permission-presets'
-import type {} from '@deepseek-ai/dsh-system-prompt'
-import type {} from '@deepseek-ai/dsh-tools'
-import type {} from '@deepseek-ai/dsh-skill'
-import type {} from '@deepseek-ai/dsh-subprocess'
+/** Application composition root and lifecycle manager shared by the DSH and Paseo hosts. */
+import type { RuntimeHost, RuntimeBackend, ExecutorPort } from '../hosts/contracts.ts'
+import type { SessionPort } from '../paseo/sessions.ts'
+import { sourceTrigger } from '../executor/shared.ts'
 import { mkdirSync } from 'node:fs'
-import { stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import { lockSync } from 'proper-lockfile'
 import { Engine, key, reasonText, type EngineForSettings, type ReceiveResult, type Ticket, type Trigger } from '../core/index.ts'
@@ -24,14 +15,6 @@ import { Commands } from '../infra/commands.ts'
 import type { Deployment, Machine } from '../deployment.ts'
 import { environmentOf, ticketEnvironment, type Variable } from './execution-environment.ts'
 import type { SetupProblem } from '../setup.ts'
-import { DshExecutor, sourceTrigger, triggerMessage, workerSessionId, ticketExecution, prepareWorkerDirectory, inputMessage, batchOf, batchLine } from '../executor/dsh.ts'
-import { PaseoExecutor } from '../executor/paseo.ts'
-import { PaseoSessions, type SessionPort } from '../paseo/sessions.ts'
-import { PaseoToolBridge } from '../paseo/bridge.ts'
-import { PaseoReports } from '../paseo/reports.ts'
-import { createPaseoAdapter, type PaseoAdapter } from '../paseo/client.ts'
-import { readPaseoTranscript } from '../paseo/transcript.ts'
-import { PaseoOperationJournal } from '../paseo-control/journal.ts'
 import { ticketCard } from './cards.ts'
 import { MasterAssessor } from './assessment.ts'
 import { KV } from '../kv.ts'
@@ -40,10 +23,9 @@ import { evalsHealth } from './views/overview.ts'
 import { TextCache } from './cache.ts'
 import { Effects } from './effects.ts'
 import { Prompts } from './prompts.ts'
-import { transcriptEntry } from './context.ts'
-import { registerHttp, type HttpHost } from './http.ts'
+import type { HttpHost } from './http.ts'
 import type { LinkTarget } from './views/records.ts'
-import { candidateCard, repliedTo, sourceLink, type LinkHost } from './links.ts'
+import { candidateCard, sourceLink, type LinkHost } from './links.ts'
 import { eventNotice, followupNotice } from './notices.ts'
 import { pullEndNotices } from '../sources/github-pull.ts'
 import { HealthBoard } from '../infra/health.ts'
@@ -52,23 +34,21 @@ import { Passes } from './passes.ts'
 import { Setup } from './setup.ts'
 import { feishuSettings } from '../sources/feishu.ts'
 import { health, type Health, type SourceContext, type SourceHost } from '../sources/host.ts'
-import { Sessions } from './sessions.ts'
 import { Settings } from './settings.ts'
 import { sourceContextOf, type SourceContextDeps } from './source-context.ts'
 import type { ResourceHost } from './resources.ts'
-import { mainTools, type MainToolsHost } from './tools/main.ts'
-import { executorTools, type ExecutorToolsHost } from './tools/executor.ts'
+import type { MainToolsHost } from './tools/main.ts'
+import type { ExecutorToolsHost } from './tools/executor.ts'
 
 // Source plugins interact with dsh-superagent exclusively through the `SourceHost` service interface.
-declare module '@deepseek-ai/cordis' { interface Context { orchestrator: SourceHost } }
 const now = (): string => new Date().toISOString()
 
 /**
  * Composition root of dsh-superagent that connects `Store`, `Setup`, `Engine`, `SourceRegistry`, `Effects`, `Outbox`, `Passes`, `Sessions`, `Settings`, `Prompts`, `DshExecutor`, and `MasterAssessor`.
- * Exposes the `SourceHost` service on the Cordis context for source plugins and coordinates startup, setup checks, HTTP route registration, and graceful shutdown.
+ * Implements `SourceHost` and coordinates startup, setup checks, optional HTTP routes, and graceful shutdown. Host adapters own service registration.
  * Locks the state directory before opening SQLite so concurrent processes cannot corrupt or double-migrate state.
  */
-export class Runtime extends Service implements SourceHost {
+export class Runtime implements SourceHost {
   readonly store: Store
   readonly setup: Setup
   readonly prompts: Prompts
@@ -81,10 +61,8 @@ export class Runtime extends Service implements SourceHost {
   readonly commands: Commands
   readonly sessions: SessionPort
   readonly settings: Settings
-  readonly executor: Pick<DshExecutor, 'prepare' | 'start' | 'stop' | 'deliver' | 'install' | 'resume' | 'shutdown' | 'dispose' | 'activeCount'>
-  private paseo?: PaseoAdapter
-  private bridge?: PaseoToolBridge
-  private bridgeOpening?: Promise<void>
+  readonly executor: ExecutorPort
+  private readonly backend: RuntimeBackend
   readonly assessor: MasterAssessor
   readonly outbox: Outbox
   readonly engine: Engine
@@ -103,8 +81,7 @@ export class Runtime extends Service implements SourceHost {
   private readonly toolHost: MainToolsHost & ExecutorToolsHost
   /** Non-zero while a main-Session tool is executing an Engine command, suppressing self-triggered domain event notices. */
   private quiet = 0
-  constructor(ctx: Context, readonly machine: Machine, restart: () => void) {
-    super(ctx, 'orchestrator')
+  constructor(private readonly host: RuntimeHost, readonly machine: Machine, restart: () => void) {
     const runtime = this
     // Lock the state directory before opening the database so another process cannot migrate or write concurrently.
     mkdirSync(machine.stateDir, { recursive: true, mode: 0o700 })
@@ -113,9 +90,14 @@ export class Runtime extends Service implements SourceHost {
     this.releaseLock = async () => { release() }
     let opened: Store | undefined
     try {
-      const report = (error: unknown) => { ctx.logger.warn('dsh-superagent: %s', String(error)) }
+      const report = (error: unknown) => { host.logger.warn('dsh-superagent: %s', String(error)) }
       const store = opened = this.store = new Store(join(machine.stateDir, 'orchestrator.sqlite'), report)
-      const setup = this.setup = new Setup({ context: ctx, machine, lifetime: this.lifetime, restart })
+      if (host.runId) {
+        const previous = store.get(KV.host.lifecycle)
+        if (previous && previous.phase !== 'stopped') host.logger.warn('Superagent is recovering after an unfinished host shutdown')
+        store.set(KV.host.lifecycle, { version: 1, runId: host.runId, phase: 'running', at: now() })
+      }
+      const setup = this.setup = new Setup({ logger: host.logger, runWorker: host.runWorker, machine, lifetime: this.lifetime, restart })
       const deployed = () => setup.configured()
         ? environmentOf({ deployment: setup.deployment, sources: this.sources, settings: store.settings() }) : undefined
       const feishu = () => setup.configured() && !!setup.deployment.feishu
@@ -136,68 +118,18 @@ export class Runtime extends Service implements SourceHost {
       this.disposers.push(sources.register(this.local.kind))
       const links: LinkHost = { store, conversation, links: this.sourceLinks, commands, sources, lifetime: this.lifetime }
       const link = (trigger: Trigger, signal?: AbortSignal) => sourceLink(links, trigger, signal)
-      const environment = (ticket: Ticket) => this.ticketEnvironment(ticket)
       const resources: ResourceHost = { store, conversation, pages: new TextCache(4_000_000), prompts, commands, masterId,
-        transcript: async id => {
-          if (machine.paseo) return readPaseoTranscript(this.paseo!, (this.sessions as PaseoSessions).agentId(id))
-          return (await ctx.sessionController.inspect(id as SessionId)).events.map(transcriptEntry)
-        },
-        modelCatalog: () => {
-          if (machine.paseo) throw new Error('Paseo models are configured in the profile paseo section; DSH model settings do not apply')
-          return ctx.sessionController.modelCatalog()
-        },
+        transcript: id => this.backend.transcript(id),
+        modelCatalog: () => host.modelCatalog(),
         promptVersion: id => this.sessions.promptVersion(id), mayRead: (id, revision) => this.sessions.mayRead(id, revision),
         feishuPageSize: () => feishuSettings(sources).readPageSize, sourceLink: link }
-      let reports: PaseoReports | undefined
-      const paseo = this.paseo = machine.paseo ? createPaseoAdapter({ url: machine.paseo.url }) : undefined
-      const journal = paseo ? new PaseoOperationJournal(store.db) : undefined
-      const bridge = this.bridge = paseo ? new PaseoToolBridge(machine.stateDir, { store, lifetime: this.lifetime,
-        tools: (binding, requestId) => {
-          if (binding.role === 'orchestrator') return mainTools(this.toolHost, { id: binding.sessionId })
-          const ticket = store.tickets.get(binding.ticketId)
-          if (!ticket) throw new Error('Unknown worker ticket')
-          return executorTools({ ...this.toolHost, submitReport: (report, claim) =>
-            reports!.receive(binding.ticketId, binding.assignmentId, requestId, report, claim) }, ticket)
-        } }) : undefined
-      const sessions = this.sessions = paseo ? new PaseoSessions({ store, prompts, effects, masterId, stateDir: machine.stateDir,
-        config: machine.paseo!, paseo, journal: journal!, bridge: bridge!, lifetime: this.lifetime, environment }) : new Sessions({ context: ctx, store, prompts, effects, health: board.claim('models'), masterId,
-        lifetime: this.lifetime,
-        closing: () => this.closing(), environment,
-        tools: (agent, ticket) => ticket ? executorTools(this.toolHost, ticket) : mainTools(this.toolHost, { id: agent.id,
-          readImage: (source, commands, message, key, signal) => source.image(agent, commands, message, key, machine.stateDir, signal) }) })
+      this.backend = host.backend({ runtime: this, links, health: board, runWorker: host.runWorker, sourceLink: link,
+        tools: () => this.toolHost, closing: () => this.closing(), paused: () => this.paused() })
+      const sessions = this.sessions = this.backend.sessions
+      this.executor = this.backend.executor
       const policyChanged: EngineForSettings['policyChanged'] = (from, to, effects) => { this.engine.policyChanged(from, to, effects) }
-      this.settings = new Settings({ store, sources, engine: { policyChanged }, health: board, context: ctx, lifetime: this.lifetime, sessions,
-        ...(paseo ? { validateModel: async () => { throw new Error('Configure Paseo role models in the profile paseo section') } } : {}),
-        sourceHost: this, setup, requestPass: () => { this.passes.request() } })
-      if (paseo) {
-        const managed = sessions as PaseoSessions
-        const executor = new PaseoExecutor({ store, effects, journal: journal!, paseo, get engine() { return runtime.engine },
-          createOptions: (ticket, assignment) => managed.workerOptions(ticket, assignment),
-          created: (ticket, assignment, id) => managed.workerCreated(ticket, assignment, id),
-          started: (ticket, assignment) => reports!.replay(ticket, assignment),
-          paused: () => this.paused() || this.closing(), maxWorkers: () => store.settings().executor.maxWorkers,
-          prepareWorkspace: async ticket => {
-            if (!await stat(ticket.execution!.directory).then(() => true, () => false)) {
-              await prepareWorkerDirectory({ context: ctx, store, environment, lifetime: this.lifetime }, ticket)
-            }
-          },
-          initialText: async ticket => {
-            const trigger = sourceTrigger({ store }, ticket)
-            return JSON.stringify({ ticket_id: ticket.id, title: ticket.title, assignment: ticket.execution?.assignment,
-              ...(trigger ? { trigger: triggerMessage(trigger, await link(trigger)) } : {}), batch: batchOf({ store }, ticket).map(batchLine),
-              ...(ticket.assignments.length > 1 ? { note: 'Continue this ticket from its existing files and reports. Read ticket/' + ticket.id + '/inputs before work; do not repeat completed actions.' } : {}) })
-          },
-          inputText: async (_ticket, input) => {
-            const trigger = input.kind === 'trigger' ? store.triggers.get(input.triggerId) : undefined
-            return inputMessage(input, trigger ? triggerMessage(trigger, await link(trigger)) : undefined) ?? 'Historical input; no new work.'
-          } })
-        this.executor = Object.assign(executor, { prepare: (ticket: Ticket, outcome: Parameters<DshExecutor['prepare']>[1]) =>
-          ({ ...ticket, execution: ticketExecution(ticket, outcome, store.settings(), machine.stateDir) }) })
-        reports = new PaseoReports({ store, report: (ticket, assignment, report) => executor.report(ticket, assignment, report),
-          relay: (id, text) => sessions.relay(id, text) })
-      } else this.executor = new DshExecutor({ context: ctx, get engine() { return runtime.engine }, store, effects, health: board.claim('worker'), machine,
-        lifetime: this.lifetime, sessions: sessions as Sessions, closing: () => this.closing(), paused: () => this.paused(), environment, sourceLink: link,
-        repliedTo: trigger => repliedTo({ store, sources }, trigger) })
+      this.settings = new Settings({ store, sources, engine: { policyChanged }, health: board, lifetime: this.lifetime, sessions,
+        validateModel: host.validateModel, sourceHost: this, setup, requestPass: () => { this.passes.request() } })
       this.assessor = new MasterAssessor({ get engine() { return runtime.engine }, commands, get deployment() { return setup.deployment }, effects,
         settings: () => store.settings(), paused: () => this.paused(), threadContext: trigger => sources.threadContext(trigger),
         deliver: (id, text) => sessions.prompt(masterId, id, text, 'steer'), candidateCard: candidate => candidateCard(links, candidate) })
@@ -229,7 +161,7 @@ export class Runtime extends Service implements SourceHost {
       this.sourceDeps = { store, engine, outbox, commands, sources, get ready() { return runtime.ready },
         get deployment() { return setup.deployment }, configured: () => setup.configured(),
         get setupProblem() { return setup.problem }, get feishuProblem() { return setup.feishuProblem }, receive: trigger => passes.receive(trigger) }
-      this.toolHost = { logger: ctx.logger, engine, store, prompts, sessions, settings: this.settings, assessor, resources,
+      this.toolHost = { logger: host.logger, engine, store, prompts, sessions, settings: this.settings, assessor, resources,
         get github() { return runtime.context({ kind: 'github', health: ['github'] }) },
         requestPass: () => { passes.request() }, sendReplies: () => outbox.sent(),
         quietly: run => { this.quiet++; try { return run() } finally { this.quiet-- } } }
@@ -268,6 +200,7 @@ export class Runtime extends Service implements SourceHost {
     return this.local.receive(request, trigger => this.passes.receive(trigger))
   }
   private localStatus() {
+    if (this.closing() || this.lifetime.aborted) return { configured: this.configured(), paused: true, accepting: false, actor: `uid:${process.getuid?.()}` }
     const source = this.sources.instance('local')
     return { configured: this.configured(), paused: this.paused(),
       accepting: !this.closing() && !this.lifetime.aborted && !!source?.enabled && source.config.acceptRequests === true,
@@ -281,7 +214,7 @@ export class Runtime extends Service implements SourceHost {
   private paused(): boolean { return !this.setup.configured() || this.store.settings().paused }
   private async initialize(): Promise<void> {
     // Register management HTTP routes before setup completes so operators can fix setup problems in the UI.
-    this.disposers.push(registerHttp(this.ctx, this.httpHost()))
+    if (this.host.mountHttp) this.disposers.push(this.host.mountHttp(this.httpHost()))
     if (this.machine.localRequests) {
       this.localTransport = await (this.localOpening = listenLocal(this.machine.stateDir, {
         receive: request => this.receiveLocal(request), replies: thread => this.local.replies(thread), status: () => this.localStatus(),
@@ -297,11 +230,9 @@ export class Runtime extends Service implements SourceHost {
     this.sessions.install()
     this.executor.install()
     if (this.closing() || this.lifetime.aborted) return
-    if (this.bridge) {
-      await (this.bridgeOpening = this.bridge.start())
-      if (this.closing() || this.lifetime.aborted) { await this.bridge.close(); return }
-    }
-    await this.sessions.ensure(this.masterId, this.machine.stateDir, 'dsh-superagent orchestrator', 'orchestrator')
+    await this.backend.start()
+    if (this.closing() || this.lifetime.aborted) return
+    await this.sessions.ensure(this.masterId, this.machine.workspaceDir ?? this.machine.stateDir, 'dsh-superagent orchestrator', 'orchestrator')
     for (const id of this.settings.syncable()) await this.settings.sync(id).catch(() => { /* sync() records its failure in health. */ })
     // If stop() was called while awaiting setup, session creation, or policy sync, do not start background loops.
     if (this.closing()) return
@@ -317,36 +248,30 @@ export class Runtime extends Service implements SourceHost {
       get deployment() { return setup.deployment },
       get setupProblem() { return setup.problem }, get feishuProblem() { return setup.feishuProblem },
       configured: () => setup.configured(), links: () => runtime.links(), ticketEnvironment: ticket => runtime.ticketEnvironment(ticket),
-      checkSetup: () => { setup.check() }, requestPass: () => { passes.request() }, models: () => this.ctx.sessionController.modelCatalog() }
+      checkSetup: () => { setup.check() }, requestPass: () => { passes.request() }, models: () => this.host.modelCatalog() }
   }
   /** Idempotent stop; concurrent or repeated calls share the same shutdown promise. */
   stop(): Promise<void> { return this.stopping ??= this.shutdown() }
   private async shutdown(): Promise<void> {
-    this.closingFlag = true; const passes = this.passes.stop(); this.stopped.abort()
-    try {
-      await this.localOpening?.then(transport => transport.close(), () => {})
-      this.assessor.stop()
-      await this.bridgeOpening?.catch(() => {})
-      await this.bridge?.close()
-      const ids = [this.masterId, ...this.store.tickets.list().map(ticket => workerSessionId(ticket.id))]
-      const agents = ids.map(id => this.ctx.agents.get(id as SessionId)).filter((agent): agent is Agent => agent !== undefined)
-      for (const agent of agents) agent.cancel({ kind: 'user' }, { keepInbox: true })
-      await Promise.allSettled([passes, this.effects.drain(), ...agents.map(agent => agent.whenIdle())])
-      // The workers' jobs and subagents stop too: their ends would start worker turns without the tool limits released below.
-      await this.executor.shutdown()
-      if (this.sessions instanceof PaseoSessions) await this.sessions.shutdown()
-      await this.paseo?.close()
-      this.executor.dispose()
-      this.sessions.dispose()
-      for (const dispose of this.disposers.reverse()) dispose()
-      await this.ctx.sessionPersistence.flush()
-    } finally {
-      // Close the database before releasing the directory lock so another process cannot open the database mid-write; a compromised lock may already be released.
+    this.closingFlag = true
+    if (this.host.runId) this.store.set(KV.host.lifecycle, { version: 1, runId: this.host.runId, phase: 'stopping', at: now(), shutdownReason: 'host_stop' })
+    const passes = this.passes.stop(), effects = this.effects.drain()
+    this.assessor.stop()
+    this.stopped.abort()
+    const backend = this.backend.quiesce()
+    // A cancelled startup may still own asynchronous work. Never release its database underneath it.
+    await this.ready.catch(() => {})
+    await this.localOpening?.then(transport => transport.close(), () => {})
+    await Promise.all([passes, effects, backend])
+    await this.backend.stop()
+    for (const dispose of this.disposers.reverse()) dispose()
+    {
       this.setup.restore()
+      if (this.host.runId) this.store.set(KV.host.lifecycle, { version: 1, runId: this.host.runId, phase: 'stopped', at: now(), shutdownReason: 'host_stop' })
       try { this.store.close() } finally {
-        const unreleased = (error: unknown) => { this.ctx.logger.warn('dsh-superagent could not release its state directory lock: %s',
-          String(error)) }
-        await this.releaseLock?.().catch(unreleased)
+        await this.releaseLock?.().catch((error: unknown) => {
+          this.host.logger.warn('Superagent could not release its state directory lock: %s', String(error))
+        })
       }
     }
   }

@@ -1,9 +1,7 @@
 /** Plugin configuration and startup verification for repository access and agent CLI identities. */
-import { LIMITS } from './limits.ts'
+import type { RunWorkerCommand } from './infra/worker-command.ts'
 import { accessSync, constants, statSync } from 'node:fs'
 import { delimiter, isAbsolute, join } from 'node:path'
-import type { Volatile } from '@deepseek-ai/cordis'
-import s from '@deepseek-ai/schemastery'
 import { z } from 'zod'
 import type { SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
 import { runAsWorker, sameDirectory, withoutDirectory, workerBin } from './infra/environment.ts'
@@ -11,48 +9,15 @@ import { SetupError } from './setup.ts'
 import type { PaseoConfig } from './paseo/sessions.ts'
 
 const reason = (error: unknown): string => error instanceof Error ? error.message : String(error)
-const absolute = (description: string) => s.string().pattern(/^\//).description(`${description} Absolute path.`)
-/** Plugin configuration of the dsh-superagent entry. Volatile fields apply without a restart because dsh-superagent reads them on each use; changing `stateDir` remounts the plugin. */
-export const Config: Schemastery<Record<string, unknown>, Omit<Machine, 'paseo'> & { paseo?: PaseoConfig | null }> = s.object({
-  stateDir: absolute('Directory for the database, locks, worker shims, the agent\'s git configuration and, by default, the ticket directories.').required(),
-  localRequests: s.boolean().default(false).description('Open the private local request socket. Source and Policy settings must also allow local requests. Requires a restart.'),
-  paseo: s.union([s.const(null), s.object({
-    url: s.string().default('ws://127.0.0.1:6767/ws'),
-    orchestrator: s.string().required().description('Paseo provider/model for the coordinator.'),
-    worker: s.string().required().description('Paseo provider/model for workers.'),
-    orchestratorMode: s.string().required(), workerMode: s.string().required(),
-    bridgeCommand: absolute('Path to bin/superagent-mcp.mjs in this checkout.').required(),
-  })]).default(null).description('Opt-in Paseo session adapter. Omit to keep DSH sessions. Requires a restart.'),
-  promptMaxChars: s.number().min(LIMITS.promptMaxChars.min).max(LIMITS.promptMaxChars.max).step(1).default(100000)
-    .description('Largest saved prompt configuration, in characters.').volatile(),
-  admissionContextMaxPages: s.number().min(LIMITS.admissionContextMaxPages.min).max(LIMITS.admissionContextMaxPages.max).step(1).default(10)
-    .description('Pages of thread context one assessment may read.').volatile(),
-  admissionContextTimeoutMs: s.number().min(LIMITS.admissionContextTimeoutMs.min).max(LIMITS.admissionContextTimeoutMs.max).step(1)
-    .default(15000).description('Time limit of one context read during an assessment, in milliseconds.').volatile(),
-})
-export type DeploymentConfig = ReturnType<typeof Config>
 export interface Machine {
   stateDir: string
+  workspaceDir?: string
   localRequests?: boolean
   paseo?: PaseoConfig
-  promptMaxChars: Volatile<number>
-  admissionContextMaxPages: Volatile<number>
-  admissionContextTimeoutMs: Volatile<number>
+  promptMaxChars: { get(): number }
+  admissionContextMaxPages: { get(): number }
+  admissionContextTimeoutMs: { get(): number }
 }
-const MOVED: Record<string, string> = {
-  repository: 'on the GitHub Source', branchPrefix: 'in the prepare command of the Execution settings', github: 'on the GitHub Source',
-  feishu: 'on the Feishu Source', author: 'prompt text', repositoryPath: 'in the prepare command of the Execution settings',
-  worktreeRoot: 'the ticket directory of the Execution settings', blockedCommands: 'in the Execution settings',
-}
-
-/** Read machine settings and reject unknown configuration keys (naming where deprecated keys moved). */
-export function machineOf(config: DeploymentConfig): Machine {
-  const unknown = Object.keys(config).filter(key => !(key in (Config.dict ?? {})))
-  if (unknown.length) throw new Error(`dsh-superagent configuration has keys it does not use: ${unknown.map(key => MOVED[key] ? `${key} (now ${MOVED[key]})` : key).join(', ')}; docs/006-deployment.md lists the keys`)
-  const { stateDir, localRequests, paseo, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs } = config
-  return { stateDir, localRequests, ...(paseo ? { paseo } : {}), promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs }
-}
-
 export const GithubAccountsSchema = z.object({
   repository: z.string().trim().regex(/^([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?$/, 'owner/name').default(''),
   cli: z.string().trim().default(''),
@@ -80,8 +45,8 @@ export function executable(name: string, path: string, exclude?: string): string
 }
 
 export type Probe = (argv: string[]) => Promise<string>
-/** Run startup checks through DSH's worker subprocess service with worker shims removed from PATH so a `gh` wrapper script reaches the real binary. */
-export function workerProbe(subprocess: SubprocessRuntime, stateDir: string, cwd: string, signal: AbortSignal): Probe {
+/** Run startup checks through the host's worker command port with worker shims removed from PATH so a `gh` wrapper reaches the real binary. */
+export function workerProbe(subprocess: SubprocessRuntime | RunWorkerCommand, stateDir: string, cwd: string, signal: AbortSignal): Probe {
   const path = withoutDirectory(process.env.PATH ?? '', workerBin(stateDir))
   return argv => runAsWorker(subprocess, ['env', `PATH=${path}`, ...argv], cwd, AbortSignal.any([signal, AbortSignal.timeout(60_000)]))
 }

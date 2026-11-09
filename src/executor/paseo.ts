@@ -93,8 +93,9 @@ export class PaseoExecutor implements Executor {
   private async created(ticket: Ticket, assignment: Assignment): Promise<string> {
     const base = this.host.createOptions(ticket, assignment)
     // Only host-built session configuration is accepted. Never accept an initial prompt here: it would race the binding.
-    if (!base || typeof base !== 'object' || Object.keys(base).some(key => !['cwd', 'config', 'labels', 'title', 'env'].includes(key)) ||
+    if (!base || typeof base !== 'object' || Object.keys(base).some(key => !['cwd', 'config', 'labels', 'title', 'env', 'parent'].includes(key)) ||
       typeof base.cwd !== 'string' || !base.cwd.startsWith('/') || base.cwd.includes('\0') ||
+      (base.parent !== undefined && (typeof base.parent !== 'string' || !base.parent)) ||
       !base.config || typeof base.config !== 'object' || Object.keys(base.config).some(key => !['provider', 'modeId', 'systemPrompt', 'mcpServers', 'toolPolicy'].includes(key)) ||
       typeof base.config.provider !== 'string' || !base.config.provider.trim() ||
       typeof base.config.modeId !== 'string' || !base.config.modeId.trim() ||

@@ -54,6 +54,20 @@ function setup() {
 }
 
 describe('Paseo Executor with real Engine and durable effects', () => {
+  it('reconciles a delivered send after reopening SQLite without sending or creating again', async () => {
+    const before = setup()
+    before.paseo.send.mockImplementationOnce(async () => { throw new Error('reply lost after delivery') })
+    const ticketId = before.accept(); before.effects.start(); await before.effects.idle(); await before.effects.drain()
+    const messageId = before.paseo.send.mock.calls[0]![2]
+    store.close(); store = new Store(join(directory, 'db.sqlite'))
+    const after = setup(); now += 10000
+    after.effects.start(); await after.effects.idle()
+    expect(after.paseo.create).not.toHaveBeenCalled(); expect(after.paseo.send).not.toHaveBeenCalled()
+    expect(store.tickets.get(ticketId)!.assignments.at(-1)!.state).toBe('pending')
+    after.messages.set(messageId, 'assignment: Work'); await after.tick()
+    expect(store.tickets.get(ticketId)!.assignments.at(-1)!.state).toBe('running')
+    expect(after.paseo.send).not.toHaveBeenCalled(); await after.effects.drain()
+  })
   it('dispatches, sends and records Paseo input consumption before a report, then stops by exact assignment', async () => {
     const h = setup(); const ticketId = h.accept()
     // Intent and domain write share a transaction. Before the effect loop runs, no session exists.

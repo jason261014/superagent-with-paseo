@@ -34,6 +34,18 @@ const timelineEntry = (seqStart: number, seqEnd = seqStart) =>
   ({ seqStart, seqEnd, timestamp: '2026-11-06T00:00:00Z', item: { type: 'assistant_message', text: `Message ${seqStart}` } })
 
 describe('Paseo session adapter', () => {
+  it('closes a pending connection before waiting for it, and never reconnects after shutdown', async () => {
+    const { adapter, client, handle } = fixture()
+    let reject!: (error: Error) => void
+    client.connect.mockImplementation(() => new Promise<void>((_, no) => { reject = no }))
+    client.close.mockImplementation(async () => { reject(new Error('connection closed')) })
+    const sending = adapter.send('agent-001', 'a', 'm-1').catch(error => error)
+    await adapter.close()
+    expect(await sending).toBeInstanceOf(Error)
+    expect(handle.send).not.toHaveBeenCalled()
+    await expect(adapter.send('agent-001', 'a', 'm-1')).rejects.toThrow('PASEO_CLOSED')
+    expect(client.connect).toHaveBeenCalledOnce()
+  })
   it('accepts only loopback URLs and safe, exact stop targets', () => {
     expect(() => createPaseoAdapter({ url: 'ws://10.0.0.1:6767/ws' })).toThrow('INVALID_PASEO_URL')
     expect(() => createPaseoAdapter({ url: 'ws://localhost:6767/ws?other=1' })).toThrow('INVALID_PASEO_URL')

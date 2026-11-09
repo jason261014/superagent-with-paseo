@@ -22,6 +22,8 @@ export function family<V, A extends unknown[] = [string]>(prefix: string, format
 }
 
 export const KV = {
+  /** Host diagnostics only; uncertain creates and sends remain owned by their operation journal. */
+  host: { lifecycle: record<{ version: 1; runId: string; phase: 'running' | 'stopping' | 'stopped'; at: string; shutdownReason?: string }>('paseo-host-lifecycle') },
   /** Local Source: replies delivered through the existing Outbox, indexed by stable message identity. */
   local: { reply: family<OutboundMessage>('local-reply:'), threadReplies: family<string[]>('local-thread-replies:') },
   conversation: { binding: record<ConversationBinding>('conversation-binding'), seq: record<number>('conversation-seq'),

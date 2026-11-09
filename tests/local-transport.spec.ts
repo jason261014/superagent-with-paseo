@@ -2,7 +2,7 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, rmSync, symli
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, expect, it, vi } from 'vitest'
-import { listenLocal, localCall, localSocketPath, type LocalHost } from '../src/local/transport.ts'
+import { listenLocal, listenPrivate, localCall, localSocketPath, type LocalHost } from '../src/local/transport.ts'
 import { main } from '../src/local/cli.ts'
 
 const dirs: string[] = [], servers: Awaited<ReturnType<typeof listenLocal>>[] = []
@@ -56,4 +56,26 @@ it('caps incoming bodies, blocks disabled input and propagates replay conflicts 
   h.status = () => ({ configured: true, paused: false, accepting: false, actor: 'uid:0' })
   await expect(localCall(dir, 'POST', '/requests', { requestId: 'id', text: 'new' })).rejects.toThrow('LOCAL_SOURCE_DISABLED')
   expect(h.receive).toHaveBeenCalledTimes(1)
+})
+
+it('waits for an asynchronous request to finish even after its client socket closes', async () => {
+  const dir = directory(), entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>()
+  const finished = vi.fn(), closed = vi.fn()
+  const server = await listenPrivate(dir, 'local-ipc', async (_req, res) => {
+    entered.resolve()
+    await release.promise
+    finished()
+    res.end('{}')
+  })
+  servers.push(server)
+  const request = localCall(dir, 'GET', '/held').catch(error => error)
+  await entered.promise
+  const stopping = server.close().then(closed)
+  try {
+    expect(await request).toBeInstanceOf(Error)
+    expect(finished).not.toHaveBeenCalled()
+    expect(closed).not.toHaveBeenCalled()
+  } finally { release.resolve(); await stopping }
+  expect(finished).toHaveBeenCalledOnce()
+  expect(closed).toHaveBeenCalledOnce()
 })

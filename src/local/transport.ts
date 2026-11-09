@@ -39,7 +39,14 @@ export async function listenPrivate(stateDir: string, name: 'local-ipc' | 'agent
     unlinkSync(path)
   } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
   const sockets = new Set<Socket>()
-  const server = createServer(listener)
+  const requests = new Set<Promise<void>>()
+  let stopped = false
+  const server = createServer((req, res) => {
+    if (stopped) { req.destroy(); return }
+    const work = Promise.resolve().then(() => listener(req, res)).catch(() => { res.destroy() })
+    requests.add(work)
+    void work.finally(() => requests.delete(work))
+  })
   server.requestTimeout = 10_000
   server.headersTimeout = 10_000
   server.on('connection', socket => {
@@ -49,10 +56,14 @@ export async function listenPrivate(stateDir: string, name: 'local-ipc' | 'agent
   await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(path, () => { server.off('error', reject); resolve() }) })
   try { chmodSync(path, 0o600) } catch (error) { await new Promise<void>(resolve => server.close(() => resolve())); throw error }
   let closing: Promise<void> | undefined
-  return { close: () => closing ??= new Promise<void>(resolve => {
-    server.close(() => resolve())
-    for (const socket of sockets) socket.destroy()
-  }) }
+  return { close: () => closing ??= (async () => {
+    stopped = true
+    await new Promise<void>(resolve => {
+      server.close(() => resolve())
+      for (const socket of sockets) socket.destroy()
+    })
+    await Promise.allSettled([...requests])
+  })() }
 }
 
 /** Caller holds the Runtime state lock; operator routes never accept agent reports. */

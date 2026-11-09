@@ -47,6 +47,7 @@ it('rejects reuse of an operation identity or logical create for different input
 
 it('holds a send after uncertain delivery until exact message identity is observed', () => {
   expect(journal.claim(send)).toEqual({ action: 'execute' })
+  db.close(); db = new DatabaseSync(join(directory, 'state.sqlite')); journal = new PaseoOperationJournal(db)
   expect(journal.claim(send)).toEqual({ action: 'reconcile' })
   expect(journal.observe({ ...message, present: false })).toEqual({ action: 'reconcile' })
   expect(() => journal.observe({ ...message, sessionId: 'another', present: true })).toThrow('identity conflict')

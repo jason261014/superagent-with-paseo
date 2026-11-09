@@ -4,6 +4,8 @@ import { ConversationBinding, ConversationInput, conversationRequestId, conversa
   type ConversationEvent, type ConversationReceiptView } from '../local/protocol.ts'
 import type { ConversationTransport } from './transport.ts'
 import type { PendingInputs } from './pending.ts'
+import type { HostStatus } from '../hosts/lifecycle.ts'
+import { ProjectPersistenceSchema } from './project-persistence.ts'
 
 interface Session {
   id: string; binding: ConversationBinding; cursor: number; closed: boolean; timer?: ReturnType<typeof setTimeout>
@@ -11,6 +13,7 @@ interface Session {
 }
 export interface ConnectionOptions {
   capabilities: readonly string[]; transport: ConversationTransport; pending: PendingInputs; pollMs?: number
+  hostStatus?: () => HostStatus
 }
 const message = (error: unknown) => error instanceof Error ? error.message : String(error)
 const sameBinding = (left: ConversationBinding, right: ConversationBinding) => {
@@ -24,6 +27,13 @@ export function createConversationConnection(options: ConnectionOptions): Provid
   const { transport, pending, capabilities } = options, pollMs = options.pollMs ?? 1000
   const listeners = new Set<(event: ProviderEvent) => void>(), sessions = new Map<string, Session>()
   let closed = false
+  const available = () => {
+    const status = options.hostStatus?.()
+    if (!status || status.phase === 'ready') return
+    const text = { starting: 'Superagent 正在启动，请稍后重试', needs_setup: 'Superagent 需要完成配置',
+      stopping: 'Superagent 正在停止', stopped: 'Superagent 已停止，请重载插件', error: 'Superagent 启动失败' }
+    throw new Error(text[status.phase] + (status.detail ? '：' + status.detail : ''))
+  }
   const emit = (event: ProviderEvent) => { if (!closed) for (const listener of listeners) listener(event) }
   const item = (session: Session, row: ProviderTimelineItem, at?: string) => {
     if (session.closed || session.emitted.has(row.id)) return
@@ -115,9 +125,12 @@ export function createConversationConnection(options: ConnectionOptions): Provid
     session.timer.unref?.()
   }
   const open = async (input: Extract<ProviderInput, { type: 'session.open' }>) => {
+    available()
     if (sessions.has(input.sessionId)) throw new Error('Session already open')
-    const restored = input.persistence ? ConversationBinding.parse(input.persistence.data) : undefined
-    if (restored && (input.persistence!.version !== 1 || input.history !== 'replay')) throw new Error('Unsupported conversation restoration')
+    const persistence = input.persistence?.version === 2
+      ? { version: 1, data: ProjectPersistenceSchema.parse(input.persistence).data.binding } : input.persistence
+    const restored = persistence ? ConversationBinding.parse(persistence.data) : undefined
+    if (restored && (persistence!.version !== 1 || input.history !== 'replay')) throw new Error('Unsupported conversation restoration')
     const binding = await transport.binding(!restored)
     if (restored) sameBinding(restored, binding)
     if (closed) return
@@ -145,6 +158,7 @@ export function createConversationConnection(options: ConnectionOptions): Provid
     session.pendingPrompts.add(p.clientMessageId)
     return enqueue(session, async () => {
       try {
+        available()
         if (session.interrupted.delete(p.clientMessageId)) throw new Error('输入等待已中断，任务状态以接收记录为准')
         if (p.delivery !== 'auto' || p.input.type !== 'message' || p.outputSchema !== undefined || p.input.content.some(part => part.type !== 'text'))
           throw new Error('Superagent currently accepts plain text messages only')

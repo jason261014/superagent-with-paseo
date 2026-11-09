@@ -1,18 +1,53 @@
 # 本地 Paseo 使用指南
 
-当前版本沿用官方 DSH 宿主和任务状态机，通过 Paseo 原生 `superagent` provider 直接对话，由 DSH 的协调者和 Paseo worker 执行任务。代码目录是 `/Users/anxiaojie/src/superagent-with-paseo`。
+当前版本沿用官方 Superagent 任务状态机：一个 Paseo 插件按项目管理独立 Runtime 子进程，通过 `superagent` provider 对话，协调者和 worker 均在 Paseo 执行。代码目录是 `/Users/anxiaojie/src/superagent-with-paseo`。
+
+## 多项目日常使用
+
+现在本机使用 `managed` 模式。现有实例登记为 `legacy`（显示名 oss-explore），对应原配置仓库 `jason261014/oss-explore`，项目根为 `/Users/anxiaojie/src/oss-explore`。原状态仍是 `/Users/anxiaojie/.dsh/state/sa-paseo-check`，没有迁移数据库或重建原会话。管理目录是 `/Users/anxiaojie/.dsh/state/superagent-manager`。
+
+原 Superagent 对话可以继续使用。新建对话时选择 **Superagent**，cwd 必须位于已登记的 root/aliases；对话随后持久绑定项目，切换窗口或目录不会把旧会话转给其他项目。未登记目录明确报错，不默认进入 legacy。不同 clone 和 worktree 不自动合并，需要显式登记。
+
+```sh
+cd /Users/anxiaojie/src/superagent-with-paseo
+node bin/superagent-project.mjs --manager-dir /Users/anxiaojie/.dsh/state/superagent-manager list
+node bin/superagent-project.mjs --manager-dir /Users/anxiaojie/.dsh/state/superagent-manager status legacy
+node bin/superagent-project.mjs --manager-dir /Users/anxiaojie/.dsh/state/superagent-manager stop legacy
+node bin/superagent-project.mjs --manager-dir /Users/anxiaojie/.dsh/state/superagent-manager start legacy
+```
+
+`start`/`restart` 返回 accepted 只代表运行操作已接受；等 host.phase=ready 后再恢复对话。首次启动可能超过前台 5 秒等待，界面会返回 `PROJECT_STARTING`；后台仍继续启动，确认 ready 后 reload/reopen 原对话。已经有接收记录的输入不要换 ID 重发。
+
+首次使用项目时按需启动，首版没有自动空闲回收。关闭对话不会停止项目；手动 stop 后，打开对话也不会自动撤销停止，必须显式 start。插件/daemon 重启会恢复此前运行的项目，手动停止和从未使用的项目保持停止。单个项目的启动错误不停止其他已运行项目。
+
+Paseo 桌面窗口与 daemon 是不同生命周期。daemon 在线时可继续执行；Paseo v0.15.3 的 `keepRunningAfterQuit` 控制退出桌面后是否停止它托管的 daemon，默认 false。我们没有修改该设置。daemon 真正停止时，插件并行停止项目并保留恢复状态；这不保证任意外部操作或未知后台进程都能被中断，也不把 Ticket 标记为完成。
+
+### 登记新项目
+
+在 `paseo-plugin/shared/local-config.ts` 的 managerConfig.projects 增加稳定 id、label、root/aliases、enabled 和独立 hostConfig。示例见 [多项目配置](../paseo-plugin/shared/projects-config.example.ts)。root 与 stateDir 必须已存在，每个项目使用不同状态目录；Node、childEntry、runtimeEntry 和 MCP 路径必须是绝对路径。managed 模式不能同时使用全局 `SUPERAGENT_STATE_DIR`。
+
+登记不会复制另一个项目的账号、Policy 或工具授权，也不自动完成原型 setup。新状态仍需 GitHub repository/agent CLI 配置，可以先通过原 DSH setup 配好、停机后再登记；未完成时显示 needs_setup。不要复制带会话身份和任务的现有数据库来创建第二个项目。
+
+项目画布仍由该项目 Runtime 管理；现有项目保留端口 17890。新项目默认不启用，启用时使用不同的非零端口，或 port=0 让 OS 分配。实际 URL 从 project status 读取。各项目日志位于 `<managerDir>/logs/<id>.log`，当前文件最多 1MiB 并保留一份轮转。
+
+### 多项目模式回滚
+
+先 disable 插件，确认所有项目子进程和状态锁释放，再恢复原 external/embedded 配置并 enable。不要同时运行两种宿主，也不要用旧备份覆盖新任务。单实例模式可读取同一 binding 的 v2 历史，事件仍使用单实例的 v1 格式；Paseo 只重载历史时可能保留已有 v2 存储。回到 managed 后同时支持 v2 项目绑定和经 legacyProjectId 精确校验的 v1 历史，其他项目绑定不会被接受。
+
+完整证据和验证范围见 [多项目验收记录](superpowers/plans/2026-11-09-paseo-multi-project-runtime-validation.md)。
 
 ## 已准备的本机配置
 
-- DSH profile：`superagent-local-check`，已链接这个 fork。
+- Paseo 插件：`superagent`，配置在 `paseo-plugin/shared/local-config.ts`。
+- 兼容/回滚用 DSH profile：`superagent-local-check`，已链接这个 fork。
 - Paseo 启动覆盖配置：`/Users/anxiaojie/.dsh/profiles/superagent-local-check/paseo.patch.yml`。
 - 独立状态目录：`/Users/anxiaojie/.dsh/state/sa-paseo-check`。
-- 管理地址：`http://127.0.0.1:3098`。
+- `managed`/`embedded` 模式没有 DSH 管理面板；`http://127.0.0.1:3098` 只在旧 DSH 宿主运行时可用。
 - Paseo daemon：`ws://127.0.0.1:6767/ws`。
 - 协调者与 worker：`claude-pool/friday-deepseek-v4-flash`，mode `auto`。
 - 本地请求已允许当前 OS 用户；GitHub 与飞书 watcher 插件关闭。
 
-这是已完成演练的环境，会保留先前任务和回复。DSH 官方 setup 仍依赖该环境已有的 GitHub repository 和 agent CLI 配置。切换模型需要修改覆盖配置并重启；已存在的 Paseo 会话仍使用创建时的模型配置。
+这是已完成演练的环境，会保留先前任务和回复。DSH 官方 setup 仍依赖该环境已有的 GitHub repository 和 agent CLI 配置。managed 模式的模型配置在对应 projects 项的 hostConfig.paseo；embedded 在顶层 hostConfig.paseo。修改后重载插件；已存在的 Paseo 会话仍使用创建时的冻结配置。
 
 ## 安装或重载 Paseo provider
 
@@ -21,40 +56,55 @@
 ```sh
 cd /Users/anxiaojie/src/superagent-with-paseo
 pnpm build
+paseo daemon config set pluginsEnabled true
 paseo plugin install /Users/anxiaojie/src/superagent-with-paseo/paseo-plugin \
   --host 127.0.0.1:6767
 paseo plugin reload superagent --host 127.0.0.1:6767
 paseo plugin ls --host 127.0.0.1:6767
 ```
 
-如果 `superagent` 已经安装，重复安装会被 Paseo 拒绝或提示已存在，此时只需重新执行 `pnpm build` 和 `paseo plugin reload`。插件默认读取 `~/.dsh/state/sa-paseo-check`，必须与 DSH profile 的 `dsh-superagent.stateDir` 相同；若使用其他目录，在启动 Paseo daemon 的环境中设置 `SUPERAGENT_STATE_DIR`，或修改 `paseo-plugin/shared/local-config.ts` 后重载插件。改环境变量后要重启 daemon 才能让插件进程继承新值。
+如果 `superagent` 已经安装，重复安装会被 Paseo 拒绝或提示已存在，此时只需重新执行 `pnpm build` 和 `paseo plugin reload`。managed 模式按项目配置 stateDir；只有旧单实例模式使用 `~/.dsh/state/sa-paseo-check` 默认值或 SUPERAGENT_STATE_DIR 覆盖。不要为了改项目状态目录重启整台日常 daemon。
 
-## 启动
+## 单实例兼容使用（embedded 模式）
 
-在一个终端前台运行；确认 Paseo daemon 已经运行（`paseo status --json`），再执行：
-
-```sh
-cd /Users/anxiaojie/src/superagent-with-paseo
-pnpm build
-dsh --profile superagent-local-check \
-  --patch /Users/anxiaojie/.dsh/profiles/superagent-local-check/paseo.patch.yml \
-  --no-open
-```
-
-保留这个终端。在另一个终端检查入口状态：
+Paseo daemon 运行时，插件在后台启动控制面。打开原来的 **Superagent** 对话直接发消息即可，无需启动 DSH 终端。
 
 ```sh
+paseo plugin ls --host 127.0.0.1:6767
+paseo plugin logs superagent --host 127.0.0.1:6767
 node /Users/anxiaojie/src/superagent-with-paseo/bin/superagent-local.mjs \
   --state-dir /Users/anxiaojie/.dsh/state/sa-paseo-check status
 ```
 
-`configured: true`、`paused: false`、`accepting: true` 表示宿主配置完成、执行未暂停且本地 Source 开放；实际任务仍经 Policy 判断。管理面板可查看工单和问题。若等待 setup，查看面板的具体缺项。
+`configured: true`、`paused: false`、`accepting: true` 表示入口可用；实际接单仍经 Policy 判断。插件显示 running 只表示 provider 已注册，后台可能仍在启动或等待配置，应用状态以 local status 和对话中的提示为准。
+
+关闭一个对话窗口不会停止全局任务。disable/reload 插件会停止或重启控制面；正常重载沿用数据库、会话绑定和待确认消息。异常退出可能需要约 30 秒等待旧目录锁过期；不得手动删除活锁。停止等待超时不代表底层任务已停。
+
+如果插件异常退出后，原对话仍显示插件进程错误，先重载插件，再重新打开或 reload 原对话。实测这样可以恢复历史和已完成任务的结果，无需另建对话或重发任务。详细记录见 [宿主迁移验证](superpowers/plans/2026-11-08-paseo-plugin-host-validation.md)。
+
+## 宿主配置与回滚
+
+`paseo-plugin/shared/local-config.ts` 提供 `hostMode`（`embedded`/`external`）、`runtimeEntry` 和 `hostConfig`。`embedded` 必须指定绝对路径的 `lib/paseo-host.js`、Node 可执行文件及 MCP 入口，且 provider 与 host 的 stateDir 必须一致；`SUPERAGENT_STATE_DIR` 会同时覆盖两端。示例见 `paseo-plugin/shared/local-config.example.ts`。
+
+不要同时启动两个宿主。回滚顺序：先 disable 插件，确认原进程退出且状态目录锁释放；将 hostMode 改回 external；再启动下面的 DSH profile，最后 enable 插件。继续使用原数据库，不以旧备份覆盖迁移后产生的数据。
+
+```sh
+paseo plugin disable superagent --host 127.0.0.1:6767
+# 修改 local-config.ts 的 hostMode 为 external，并确认旧锁已释放。
+dsh --profile superagent-local-check \
+  --patch /Users/anxiaojie/.dsh/profiles/superagent-local-check/paseo.patch.yml \
+  --no-open
+# 在另一个终端恢复 provider：
+paseo plugin enable superagent --host 127.0.0.1:6767
+```
 
 ## 提交任务与继续对话
 
 ### Paseo 原生窗口
 
 在 Paseo 新建 agent/session 时，把 provider 选择为 **Superagent**，然后直接发送普通文本。第一次消息会按现有 Local Source、Policy 和 coordinator 流程创建或等待接单；协调者的确认、追问和结果会回到同一个 Paseo 窗口。收到追问后，继续在同一个窗口回复即可；新的一轮独立任务仍使用新的 request 身份，不会自动串到旧 Ticket。
+
+每个 Ticket 的 worker 会作为 orchestrator 的 delegated agent 出现在同一个 Paseo workspace 中。worker 进程的初始目录是 orchestrator 的 workspace 目录，Ticket 自己的执行目录通过 `DSH_SUPERAGENT_DIR` 传入；worker 指令要求它在执行任何命令前先 `cd "$DSH_SUPERAGENT_DIR"`。
 
 Paseo provider 目前只接受纯文本消息。图片、文件、结构化 output schema 和其他输入类型会被拒绝。Paseo 窗口的中断按钮只中断当前前台输入等待；已经被宿主接收的 Ticket 仍会继续执行。要停止已接收的 Ticket，请在同一窗口发送明确的停止请求，让协调者按原有工具流程处理。
 
@@ -102,6 +152,21 @@ node /Users/anxiaojie/src/superagent-with-paseo/bin/superagent-local.mjs \
 
 ## 停止与恢复
 
-在启动终端按 Ctrl-C，等待 DSH 完成退出。状态、任务目录和回复保留；下次执行相同启动命令恢复。宿主会对它绑定的活跃 Paseo 会话尝试中断，但 Paseo 的 idle 观测不能证明所有后台子进程已停止，停止记录会保留这项未知。
+managed 模式优先使用前面的项目 CLI 停启单个项目；disable/enable/reload 插件影响全部项目。embedded 单实例通过 `paseo plugin disable superagent --host 127.0.0.1:6767` 停止，通过 enable 恢复；只想重启则用 reload。关闭聊天窗口不会停止宿主。
+
+仅在 external 回滚模式下，才在 DSH 启动终端按 Ctrl-C，等待退出，下次使用相同命令恢复。两种模式都会保留状态、任务目录和回复。宿主会对它绑定的活跃 Paseo 会话尝试中断，但 Paseo 的 idle 观测不能证明所有后台子进程已停止，停止记录会保留这项未知。
 
 官方 `scripts/dsh-superagent` 默认控制另一个 profile，且不接收这里的覆盖配置；本指南使用上面的显式前台命令。不要同时启动同一 profile 的 DSH 基线模式和 Paseo 模式。
+
+
+## 只读流转画布
+
+需要查看一条请求从 Superagent 入口到 Orchestrator、Worker 和回复出口的流转时，在 `paseo-plugin/shared/local-config.ts` 的 `hostConfig` 加入：
+
+```ts
+flowWeb: { enabled: true, port: 17890 },
+```
+
+重新 `pnpm build` 并 `paseo plugin reload superagent` 后，宿主会在 `127.0.0.1:17890` 启动只读服务。访问令牌和完整链接写在 `<stateDir>/flow-web/access.json`（权限 `0600`），把其中 `url` 加上 `#token=<token>` 在浏览器打开即可。
+
+画布只读：不能派工、重试、取消、改 Policy 或发送消息；打开/关闭页面不会启停控制面。它直接读取现有 SQLite 记录，不发起 LLM 调用。首次查看历史汇报时，无接收时间戳的记录会显示“timestamp not recorded”；未确认的 create/send 意图显示 `unconfirmed`。`sent` 只表示回复已进入发送出口，不表示用户已读。旧 Assignment 的实时 transcript 无法回查，只按已确认的 create 记录还原其 Worker `agentId`。

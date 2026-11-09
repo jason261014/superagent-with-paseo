@@ -7,7 +7,7 @@ import type { Effects } from '../app/effects.ts'
 import type { Variable } from '../app/execution-environment.ts'
 import type { Ticket, Assignment } from '../core/index.ts'
 import { key } from '../core/index.ts'
-import { mandateInstructions, workerSessionId } from '../executor/dsh.ts'
+import { mandateInstructions, workerSessionId } from '../executor/shared.ts'
 import { family, KV } from '../kv.ts'
 import type { PaseoAdapter } from './client.ts'
 import { PaseoOperationJournal } from '../paseo-control/journal.ts'
@@ -15,7 +15,7 @@ import type { PaseoToolBridge, ToolBinding } from './bridge.ts'
 import { bridgeSocketPath } from './bridge.ts'
 import { agentVariables } from '../infra/environment.ts'
 
-export interface PaseoConfig { url: string; orchestrator: string; worker: string; orchestratorMode: string; workerMode: string; bridgeCommand: string }
+export interface PaseoConfig { url: string; orchestrator: string; worker: string; orchestratorMode: string; workerMode: string; bridgeCommand: string; bridgeNode?: string }
 type Binding = { agentId: string; revision: number; options: PaseoAgentCreateOptions }
 const bindings = family<Binding>('paseo-session:')
 const configs = family<{ options: PaseoAgentCreateOptions; revision: number }>('paseo-session-config:')
@@ -46,7 +46,9 @@ export class PaseoSessions implements SessionPort {
     return '[dsh-superagent prompt revision ' + version.revision + ']\n'
       + this.host.prompts.compose(version.config, ticket ? 'worker' : 'orchestrator', ticket ? this.host.environment(ticket) : undefined)
       + '\n' + (ticket ? mandateInstructions(ticket.mandate) : '')
-      + '\nRuntime: Paseo. Use the superagent MCP tools with their original orchestrator_* names. Reports, questions and replies must use those tools; ordinary chat text is not a report. End the turn when waiting; never sleep or poll for input. Do not call the operator socket. Do not start subagents or detached/background jobs in this prototype: their lifecycle is not tracked here. Skills below are the registered Superagent skill text.\n'
+      + '\nRuntime: Paseo. Use the superagent MCP tools with their original orchestrator_* names. Reports, questions and replies must use those tools; ordinary chat text is not a report. End the turn when waiting; never sleep or poll for input. Do not call the operator socket. Do not start subagents or detached/background jobs in this prototype: their lifecycle is not tracked here.'
+      + (ticket ? ' The shell starts in the orchestrator workspace so Paseo can group this worker under it; run `cd "$DSH_SUPERAGENT_DIR"` before any other command and never write outside that ticket directory.' : '')
+      + ' Skills below are the registered Superagent skill text.\n'
       + this.host.prompts.skills(version.config).map(([name, text]) => '\n<skill name=' + JSON.stringify(name) + '>\n' + text + '\n</skill>').join('\n')
   }
   private options(id: string, binding: ToolBinding, cwd: string, title: string, ticket?: Ticket) {
@@ -57,7 +59,7 @@ export class PaseoSessions implements SessionPort {
     const options: PaseoAgentCreateOptions = { cwd, title, config: {
       provider: ticket ? config.worker : config.orchestrator, modeId: ticket ? config.workerMode : config.orchestratorMode,
       systemPrompt: this.instructions(version, ticket), mcpServers: { superagent: { type: 'stdio',
-        command: process.execPath, args: [config.bridgeCommand], env: { SUPERAGENT_TOOL_SOCKET: bridgeSocketPath(this.host.stateDir),
+        command: this.host.config.bridgeNode ?? process.execPath, args: [config.bridgeCommand], env: { SUPERAGENT_TOOL_SOCKET: bridgeSocketPath(this.host.stateDir),
           SUPERAGENT_TOOL_TOKEN: token }, alwaysLoad: true } },
     }, env: { ...Object.fromEntries(Object.entries(agentVariables(this.host.stateDir)).filter((entry): entry is [string, string] => entry[1] !== undefined)),
       GH_TOKEN: '', GITHUB_TOKEN: '', GIT_CONFIG_COUNT: '0', PATH: process.env.PATH ?? '',
@@ -68,8 +70,18 @@ export class PaseoSessions implements SessionPort {
     return value
   }
   workerOptions(ticket: Ticket, assignment: Assignment): PaseoAgentCreateOptions {
-    return this.options('worker:' + ticket.id + ':' + assignment.id, { role: 'worker', sessionId: workerSessionId(ticket.id),
-      ticketId: ticket.id, assignmentId: assignment.id }, ticket.execution!.directory, ticket.title, ticket).options
+    // Paseo scopes a workspace by its directory, so a worker only appears under the orchestrator
+    // when it runs in the orchestrator's workspace. The ticket stays isolated through
+    // DSH_SUPERAGENT_DIR, which the worker instructions require it to cd into first.
+    const parent = this.host.store.get(bindings(this.host.masterId))
+    const cwd = parent?.options.cwd ?? ticket.execution!.directory
+    const { options } = this.options('worker:' + ticket.id + ':' + assignment.id, { role: 'worker', sessionId: workerSessionId(ticket.id),
+      ticketId: ticket.id, assignmentId: assignment.id }, cwd, ticket.title, ticket)
+    // Paseo groups delegated agents by this label and cascades archive to them. The parent is the
+    // orchestrator's bound agent; absence of a binding (tests, or a host before setup) leaves the
+    // worker top-level rather than inventing an unresolvable parent.
+    return parent ? { ...options, cwd: parent.options.cwd, parent: parent.agentId,
+      labels: { ...options.labels, 'paseo.parent-agent-id': parent.agentId } } : options
   }
   workerCreated(ticket: Ticket, assignment: Assignment, agentId: string): void {
     const saved = this.host.store.get(configs('worker:' + ticket.id + ':' + assignment.id))!
@@ -149,12 +161,13 @@ export class PaseoSessions implements SessionPort {
   }
   modelRetry(_id: string | undefined) { return {} }
   async shutdown(): Promise<void> {
+    const signal = AbortSignal.timeout(700)
     await Promise.allSettled(this.host.store.keys(bindings).map(async name => {
       const binding = this.host.store.get(name)
       if (!binding) return
       const observed = await this.host.paseo.snapshot(binding.agentId)
       if (observed.agentId === binding.agentId && observed.cwd === binding.options.cwd && observed.status !== 'idle') {
-        await this.host.paseo.interrupt(binding.agentId)
+        await this.host.paseo.interrupt(binding.agentId, signal)
       }
     }))
   }

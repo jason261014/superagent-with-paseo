@@ -4,6 +4,12 @@ This fork builds on the [DeepSeek Super Agent research prototype](https://github
 
 ## Current status
 
+The Paseo plugin now supports managed projects: one provider routes conversations to independent Runtime child processes, with separate state, policy, coordinator bindings and process environments. Processes start on demand and retain explicit running/stopped intent across daemon restarts; closing a conversation does not stop its project. The prepared instance is registered as `legacy`, using its original state and conversation. See [local usage](docs/local-usage.md) and [multi-project validation](docs/superpowers/plans/2026-11-09-paseo-multi-project-runtime-validation.md).
+
+The independent `./paseo-host` ESM export remains the common single-project application. Embedded and external compatibility modes still work, including conversation persistence downgrade/upgrade when rolling back to the same host. DSH remains supported through `src/hosts/dsh.ts`; all paths share the same Engine, Store, effects, local IPC and role-bound MCP bridge.
+
+The earlier single-host milestone verified a question/reply task across plugin reload, recovery after a plugin-process crash, a read-only migration task and a DSH compatibility round trip. These November 8 checks used the real v0.15.2 daemon, desktop result inspection and a separate v0.15.3 daemon restart. See [host validation](docs/superpowers/plans/2026-11-08-paseo-plugin-host-validation.md) for that historical scope.
+
 The official Runtime now registers a default-closed local Source/Channel. An opt-in Unix socket and CLI submit explicit requests and read persisted replies. Without the `paseo` configuration, the Runtime uses the original DSH Sessions and DshExecutor. Both backends retain the original setup, including its configured repository and agent GitHub CLI. Local input does not remove those setup dependencies.
 
 Tests exercise the real Runtime, coordinator tools, worker report tools, Engine and Outbox, with DSH model/session services mocked. They cover acknowledgement, questions, same-thread follow-up, upstream ready → completed, persisted replies, duplicate submissions and restart. This is not a live-model validation claim.
@@ -12,7 +18,7 @@ Separately, a dedicated DSH profile completed a real-model A/B question-and-answ
 
 Paseo is now an opt-in coordinator/worker backend. The Runtime keeps the DSH Engine, Policy, Ticket, Assignment, Effects, Outbox and prompt composition, while `PaseoSessions` creates labelled agents and sends stable, journaled messages. A private owner-only MCP bridge exposes the original `orchestrator_*` tools; worker report calls carry a non-claimable ticket/assignment binding and durable receipts replay reports that arrive before launch confirmation. The experimental executor restrictions were removed so `ready` still completes a ticket under the upstream semantics.
 
-Enable it in the machine profile with `paseo.url`, `paseo.orchestrator`, `paseo.worker`, their mode IDs, and an absolute `bridgeCommand` pointing to `bin/superagent-mcp.mjs`. Keep `localRequests: true` and the local Source/Policy settings for the operator socket. The bridge socket is separate from the operator socket and is never a worker report transport.
+In embedded mode configure `hostConfig.paseo` in the plugin's local config, including an explicit `bridgeNode`; the host enables the local socket but still requires the existing Source/Policy settings. In the DSH compatibility path, configure the machine profile with `paseo.url`, `paseo.orchestrator`, `paseo.worker`, their mode IDs, and an absolute `bridgeCommand` pointing to `bin/superagent-mcp.mjs`, and keep `localRequests: true`. The bridge socket carries role-bound model tool calls and reports; the separate operator socket is never a worker report transport.
 
 The Paseo backend has explicit limits: it does not provide DSH's silent history injection, child-job completion evidence, or a queue fence proving that a previously sent message cannot still arrive. Background notices are persisted and attached to the next coordinator message. Interruption records the exact request and fresh runtime observation; an idle observation is not treated as proof that unknown children have stopped.
 
@@ -22,7 +28,7 @@ For the prepared local profile and day-to-day commands, see [Local usage](docs/l
 
 ## Local entry
 
-Build with `pnpm build`. In a dedicated DSH profile linked to this checkout, configure the existing plugin:
+For day-to-day embedded use, follow [Local usage](docs/local-usage.md); no DSH process is required. The following describes the retained DSH setup/compatibility path, not an extra daemon to run alongside embedded mode. Build with `pnpm build`. In a dedicated DSH profile linked to this checkout, configure the existing plugin:
 
 ```yaml
 - id: dsh-superagent
@@ -56,4 +62,9 @@ Access means the **same trusted OS account**, including programs running under i
 
 The narrow session port is implemented in `src/paseo/sessions.ts`, the report receipt path in `src/paseo/reports.ts`, and the role-bound MCP bridge in `src/paseo/bridge.ts` / `src/paseo/mcp.ts`. The official DSH path remains intact and still passes its full regression suite.
 
-Reuse stable request identities and uncertain-result reconciliation from the existing Paseo adapter. An incomplete lookup remains unknown; idle is neither business completion nor proof all child processes stopped. No verified Paseo queue fence exists yet. Independent delivery storage, an acceptance state machine, generic runtime plugins and broad host restructuring remain deferred.
+Reuse stable request identities and uncertain-result reconciliation from the existing Paseo adapter. An incomplete lookup remains unknown; idle is neither business completion nor proof all child processes stopped. No verified Paseo queue fence exists yet. Independent delivery storage, an acceptance state machine, a generic runtime plugin framework and broad domain restructuring remain deferred. Host shutdown uses bounded waiting without prematurely releasing database ownership; uncertain create/send recovery still uses the existing journal.
+
+
+## Flow canvas
+
+Set `hostConfig.flowWeb = { enabled: true, port: 17890 }` to expose the read-only canvas on `127.0.0.1`. The bearer token and URL live in `<stateDir>/flow-web/access.json` (mode `0600`); open `<url>#token=<token>`. The page projects existing Store records only: it cannot dispatch, retry, cancel, send, or edit Policy, and it starts no LLM calls. Historical report receipts without timestamps show `timestamp not recorded`; create/send intents without a confirmed result show `unconfirmed`; `sent` never means the person read the reply.

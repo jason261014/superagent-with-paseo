@@ -7,7 +7,8 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, expectTypeOf, it, vi } from 'vitest'
 import type { UserMessage } from '@deepseek-ai/dsh-llm'
 import { renderPrompt } from '@deepseek-ai/dsh-system-prompt'
-import { Runtime } from '../src/app/runtime.ts'
+import type { Runtime } from '../src/app/runtime.ts'
+import { createDshRuntime } from '../src/hosts/dsh.ts'
 import { localCall, localSocketPath } from '../src/local/transport.ts'
 import { privateCall } from '../src/local/transport.ts'
 import { bridgeSocketPath } from '../src/paseo/bridge.ts'
@@ -109,13 +110,15 @@ function seed(store: Store, accounts: Accounts = {}): void {
   const feishu = accounts.feishu === null ? undefined : { ...settings.sources.feishu?.config, cli: BOT(), ...accounts.feishu }
   store.saveSettings(SettingsSchema.parse({ ...settings, sources: { ...others, github: { enabled: true, config: { repository: 'acme/widgets', cli: AGENT(), ...accounts.github } }, ...feishu ? { feishu: { enabled: true, config: feishu } } : {} } }))
 }
+let runtimeContext: Context
 let restarts: ReturnType<typeof vi.fn<() => void>>
 async function restart(machine: Partial<Machine> = {}, accounts: Accounts = {}): Promise<Runtime> {
   await runtime.stop()
   const store = new Store(join(directory, 'orchestrator.sqlite')); seed(store, accounts); store.close()
   const ctx = new Context()
   for (const [name, service] of Object.entries(services)) ctx.reflect.provide(name, service)
-  runtime = new Runtime(ctx, testMachine({ stateDir: directory, ...machine }), restarts)
+  runtimeContext = ctx
+  runtime = createDshRuntime(ctx, testMachine({ stateDir: directory, ...machine }), restarts)
   return runtime
 }
 let deliveries: ReturnType<typeof vi.fn<(request: { sessionId: string; mode: 'queue' | 'steer'; id: string; text: string }) => void>>
@@ -266,6 +269,8 @@ it('runs original coordinator/worker tools over the Paseo bridge, buffers early 
   const machine = { localRequests: true, paseo: { url: 'ws://127.0.0.1:6767/ws', orchestrator: 'codex/test', worker: 'claude-pool/test',
     orchestratorMode: 'auto-review', workerMode: 'auto', bridgeCommand: '/test/superagent-mcp.mjs' } }
   await (await restart(machine, { feishu: null })).ready
+  // The DSH compatibility host must not advertise its unrelated model catalog to a Paseo coordinator.
+  await expect(call('paseo-0', 'orchestrator_read', { resource: 'models' }, 'models')).rejects.toThrow('Paseo models are configured')
   const settings = runtime.store.settings()
   runtime.store.saveSettings({ ...settings, executor: { ...settings.executor, prepare: '' },
     sources: { ...settings.sources, local: { enabled: true, config: { acceptRequests: true } } },
@@ -292,7 +297,11 @@ it('runs original coordinator/worker tools over the Paseo bridge, buffers early 
   await expect(call('paseo-0', 'orchestrator_read', { resource: `ticket/${ticket.id}/transcript` }, 'gapped-transcript')).rejects.toThrow('TIMELINE_GAP')
   expect(worker.config.systemPrompt).toContain('dsh-superagent prompt revision')
   expect(worker.config.systemPrompt).toContain('Paseo')
-  expect(worker.cwd).toBe(ticket.execution!.directory)
+  expect(worker.cwd).toBe(directory)
+  expect(worker.parent).toBe('paseo-0')
+  expect(worker.labels?.['paseo.parent-agent-id']).toBe('paseo-0')
+  expect(worker.env?.DSH_SUPERAGENT_DIR).toBe(ticket.execution!.directory)
+  expect(worker.config.systemPrompt).toContain('cd "$DSH_SUPERAGENT_DIR"')
   await expect(call('paseo-1', 'orchestrator_route', {})).rejects.toThrow('unavailable for this role')
   await expect(call('paseo-1', 'orchestrator_read', { resource: 'settings' })).rejects.toThrow()
   await call('paseo-0', 'orchestrator_reply', { ticket_id: ticket.id, purpose: 'attention', human_action: 'A or B?', text: 'A or B?' }, 'question')
@@ -389,7 +398,8 @@ beforeEach(async () => {
   for (const [name, service] of Object.entries(services)) ctx.reflect.provide(name, service)
   for (const cli of [AGENT(), OTHER(), BOT()]) writeFileSync(cli, '#!/bin/sh\n', { mode: 0o755 })
   const store = new Store(join(directory, 'orchestrator.sqlite')); seed(store); store.close()
-  runtime = new Runtime(ctx, testMachine({ stateDir: directory }), restarts)
+  runtimeContext = ctx
+  runtime = createDshRuntime(ctx, testMachine({ stateDir: directory }), restarts)
   await runtime.ready
   // Source kinds are normally registered by plugins that are not loaded in unit tests.
   runtime.sources.register(feishuKind); runtime.sources.register(githubKind)
@@ -1554,7 +1564,7 @@ it('refuses a second process on the same state directory before it opens the dat
   db.close()
   const ctx = new Context()
   for (const [name, service] of Object.entries(services)) ctx.reflect.provide(name, service)
-  expect(() => new Runtime(ctx, testMachine({ stateDir: directory }), vi.fn())).toThrow(/already being held/)
+  expect(() => createDshRuntime(ctx, testMachine({ stateDir: directory }), vi.fn())).toThrow(/already being held/)
   expect(runtime.store.get(KV.store.schema)).toBe(10)
   runtime.store.set(KV.store.schema, SCHEMA_VERSION)
 })
@@ -1589,12 +1599,12 @@ it('releases the database and the state directory lock when it fails to start, s
   db.prepare("UPDATE kv SET value='99' WHERE key='schema'").run()
   db.close()
   const context = () => { const ctx = new Context(); for (const [name, service] of Object.entries(services)) ctx.reflect.provide(name, service); return ctx }
-  expect(() => new Runtime(context(), testMachine({ stateDir: directory }), vi.fn())).toThrow('Unsupported orchestrator database version 99')
+  expect(() => createDshRuntime(context(), testMachine({ stateDir: directory }), vi.fn())).toThrow('Unsupported orchestrator database version 99')
   const fixed = new DatabaseSync(join(directory, 'orchestrator.sqlite'))
   fixed.prepare('UPDATE kv SET value=? WHERE key=?').run(String(SCHEMA_VERSION), 'schema')
   fixed.close()
   // A lock kept by the failed start would make this throw that the lock is already held.
-  runtime = new Runtime(context(), testMachine({ stateDir: directory }), vi.fn())
+  runtime = createDshRuntime(context(), testMachine({ stateDir: directory }), vi.fn())
   await runtime.ready
   expect(runtime.store.get(KV.store.schema)).toBe(SCHEMA_VERSION)
 })
@@ -1627,7 +1637,7 @@ it('restarts a worker that was mid-work when the host stopped with the recovery 
   await runTool(sessionId, 'orchestrator_report', { state: 'progress', summary: 'halfway' })
   // Stopping cancels the worker's turn: it goes idle and reports the abort as an error, which a stopping host takes as no end.
   const agent = agents.get(sessionId)! as { status: string; cancel: ReturnType<typeof vi.fn> }
-  const stopping = (runtime as unknown as { ctx: Context }).ctx
+  const stopping = runtimeContext
   agent.cancel.mockImplementation(() => {
     agent.status = 'idle'
     stopping.emit('agent/status', { agent, status: 'idle' } as never)
@@ -1649,7 +1659,7 @@ it('keeps the report of a blocked, failed or ready worker whose turn ends, and r
     const relayed = relays(runtime.masterId).length
     const agent = agents.get(sessionId)! as { status: string }
     agent.status = 'idle'
-    ;(runtime as unknown as { ctx: Context }).ctx.emit('agent/status', { agent, status: 'idle' } as never)
+    ;runtimeContext.emit('agent/status', { agent, status: 'idle' } as never)
     await runtime.idle()
     expect(runtime.store.tickets.get(ticket.id)!.assignments.at(-1)!.report).toMatchObject({ state, summary: `${state} report` })
     expect(relays(runtime.masterId)).toHaveLength(relayed)
@@ -1660,7 +1670,7 @@ it('relays the status-request hint when a worker\'s turn ends with no text and n
   const { ticket, sessionId } = await acceptedTicket()
   const agent = agents.get(sessionId)! as { status: string }
   agent.status = 'idle'
-  ;(runtime as unknown as { ctx: Context }).ctx.emit('agent/status', { agent, status: 'idle' } as never)
+  ;runtimeContext.emit('agent/status', { agent, status: 'idle' } as never)
   await vi.waitFor(() => expect(runtime.store.tickets.get(ticket.id)!.assignments.at(-1)!.report).toMatchObject({ state: 'waiting' }))
   expect(relays(runtime.masterId).at(-1)).toMatchObject({ kind: 'worker_report', ticket: { ticket_id: ticket.id }, state: 'waiting',
     summary: expect.stringContaining('orchestrator_ticket_request_status') })
@@ -1668,7 +1678,7 @@ it('relays the status-request hint when a worker\'s turn ends with no text and n
 
 it('fails a ticket at once on a worker error that is not passing, and relays it', async () => {
   const { ticket, sessionId } = await acceptedTicket()
-  ;(runtime as unknown as { ctx: Context }).ctx.emit('agent/error', { agent: agents.get(sessionId), turn: 1, step: 1, error: new Error('Invalid tool schema') } as never)
+  ;runtimeContext.emit('agent/error', { agent: agents.get(sessionId), turn: 1, step: 1, error: new Error('Invalid tool schema') } as never)
   await vi.waitFor(() => expect(runtime.store.tickets.get(ticket.id)!.assignments.at(-1)!.report).toMatchObject({ state: 'failed', summary: expect.stringContaining('Invalid tool schema') }))
   expect(relays(runtime.masterId).at(-1)).toMatchObject({ kind: 'worker_report', ticket: { ticket_id: ticket.id }, state: 'failed' })
 })
@@ -1842,7 +1852,7 @@ it('restarts a worker whose shell job the host stop ended with the recovery note
   jobs.run(sessionId)
   const agent = agents.get(sessionId)! as { status: string }
   agent.status = 'idle'
-  ;(runtime as unknown as { ctx: Context }).ctx.emit('agent/status', { agent, status: 'idle' } as never)
+  ;runtimeContext.emit('agent/status', { agent, status: 'idle' } as never)
   await runtime.idle()
   expect(runtime.store.tickets.get(ticket.id)!.assignments.at(-1)!.report).toMatchObject({ state: 'progress' })
   // The host stops, and its jobs end with it.
@@ -1871,7 +1881,7 @@ it('selects its own preset again for a main Session or worker a person switched 
   }) }
   services.agentPresets = presets
   await (await restart()).ready
-  const emit = (sessionId: string, preset: string) => (runtime as unknown as { ctx: Context }).ctx.emit('agent-preset/selected', sessionId, preset)
+  const emit = (sessionId: string, preset: string) => runtimeContext.emit('agent-preset/selected', sessionId, preset)
   // A person opened the blank main Session in DSH's Web UI, which selected the default preset for it.
   emit(runtime.masterId, 'standard')
   await vi.waitFor(() => expect(presets.select).toHaveBeenCalledWith(agents.get(runtime.masterId), 'dsh-superagent-router'))
@@ -1898,7 +1908,7 @@ it('gives a subagent of a worker only the worker\'s work tools, and none once th
   await (controller.create as (options: { sessionId: string }) => Promise<void>)({ sessionId: 'child-1' })
   const child = agents.get('child-1')! as unknown as { session: { header: { parentSession?: string } } }
   child.session.header = { parentSession: sessionId }
-  await (runtime as unknown as { ctx: Context }).ctx.parallel('agent/created', { agent: child } as never)
+  await runtimeContext.parallel('agent/created', { agent: child } as never)
   expect(restricts.get('child-1')).toEqual([{ allow: ['read', 'read_image', 'grep', 'bash', 'job_output', 'job_list', 'job_kill', 'web_search', 'skill'] }])
   expect(guards.get('child-1')!()).toBeUndefined()
   runtime.engine.stopTicket(ticket.id)
@@ -1907,14 +1917,14 @@ it('gives a subagent of a worker only the worker\'s work tools, and none once th
   await (controller.create as (options: { sessionId: string }) => Promise<void>)({ sessionId: 'child-2' })
   const other = agents.get('child-2')! as unknown as { session: { header: { parentSession?: string } } }
   other.session.header = { parentSession: 'someone-else' }
-  await (runtime as unknown as { ctx: Context }).ctx.parallel('agent/created', { agent: other } as never)
+  await runtimeContext.parallel('agent/created', { agent: other } as never)
   expect(restricts.get('child-2')).toBeUndefined()
 })
 
 it('gives a subagent of a worker\'s subagent the same work tools and guard', async () => {
   const { ticket, sessionId } = await acceptedTicket()
   const create = controller.create as (options: { sessionId: string }) => Promise<void>
-  const created = (runtime as unknown as { ctx: Context }).ctx
+  const created = runtimeContext
   for (const [id, parent] of [['child-1', sessionId], ['grandchild-1', 'child-1']] as const) {
     await create({ sessionId: id })
     const agent = agents.get(id)! as unknown as { session: { header: { parentSession?: string } } }
