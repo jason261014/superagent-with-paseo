@@ -55,8 +55,12 @@ it('runs real isolated applications and original tools through one project provi
     await manager.ready
     for (const id of ['alpha', 'beta']) {
       await connection.send({ type: 'session.open', requestId: 'open-' + id, sessionId: id, history: 'skip',
-        config: { cwd: fixture.root(id), env: {}, mcpServers: {}, settings: {}, persist: true } } as ProviderInput)
+        config: { cwd: fixture.root(id), env: { PASEO_AGENT_ID: 'entry-' + id }, mcpServers: {}, settings: {}, persist: true } } as ProviderInput)
       expect(events).toContainEqual(expect.objectContaining({ type: 'session.ready', sessionId: id }))
+      const createdAgents = JSON.parse(readFileSync(join(fixture.stateDir(id), 'fixture-agents.json'), 'utf8')) as [string, { parent?: string; labels: Record<string, string> }][]
+      const orchestrator = createdAgents.find(([, options]) => !options.labels.superagentAssignment)![1]
+      expect(orchestrator.parent).toBeUndefined()
+      expect(orchestrator.labels['paseo.parent-agent-id']).toBe('entry-' + id)
       await connection.send({ type: 'session.prompt', sessionId: id,
         prompt: { clientMessageId: 'shared-id', delivery: 'auto', input: { type: 'message', content: [{ type: 'text', text: 'Make result for ' + id }] } } } as ProviderInput)
       const opened = events.find(event => event.type === 'session.opened' && event.sessionId === id) as Extract<ProviderEvent, { type: 'session.opened' }>

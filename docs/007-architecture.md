@@ -298,7 +298,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/hosts/paseo-config.ts` | Data-only standalone host configuration |
 | `src/projects/config.ts`, `registry.ts`, `catalog.ts` | Project registration, canonical paths, durable auto-registration catalog and configuration modes |
 | `src/projects/protocol.ts`, `child.ts`, `process.ts` | Private project process protocol, standalone entry and owned child lifecycle |
-| `src/projects/intents.ts`, `manager.ts`, `management.ts`, `cli.ts`, `index.ts` | Durable running intent, project process ownership and private management control |
+| `src/projects/intents.ts`, `entry-agents.ts`, `manager.ts`, `management.ts`, `cli.ts`, `index.ts` | Durable running intent and entry-agent parentage, project process ownership and private management control |
 | `src/paseo-ui/project-router.ts` | Durable project-bound provider sessions with legacy restoration |
 | `src/paseo-ui/project-persistence.ts` | Shared project persistence envelope and single-host rollback compatibility |
 | `src/executor/shared.ts` | Shared ticket instructions, message payloads and workspace preparation |

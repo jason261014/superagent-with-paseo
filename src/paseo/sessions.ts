@@ -15,7 +15,7 @@ import type { PaseoToolBridge, ToolBinding } from './bridge.ts'
 import { bridgeSocketPath } from './bridge.ts'
 import { agentVariables } from '../infra/environment.ts'
 
-export interface PaseoConfig { url: string; orchestrator: string; worker: string; orchestratorMode: string; workerMode: string; bridgeCommand: string; bridgeNode?: string }
+export interface PaseoConfig { url: string; orchestrator: string; worker: string; orchestratorMode: string; workerMode: string; bridgeCommand: string; bridgeNode?: string; entryAgentId?: string }
 type Binding = { agentId: string; revision: number; options: PaseoAgentCreateOptions }
 const bindings = family<Binding>('paseo-session:')
 const configs = family<{ options: PaseoAgentCreateOptions; revision: number }>('paseo-session-config:')
@@ -56,6 +56,10 @@ export class PaseoSessions implements SessionPort {
     if (saved) return saved
     const version = this.host.prompts.current(), config = this.host.config
     const token = this.host.bridge.grant(binding)
+    // Paseo derives the lower-left parent jump from this label; workers keep the orchestrator as their parent.
+    // Do not pass `parent`: the SDK turns it into callerAgentId, but Paseo does not register a new entry
+    // agent until session.open returns. The label alone creates the visible link without that ordering cycle.
+    const entryAgentId = ticket ? undefined : config.entryAgentId
     const options: PaseoAgentCreateOptions = { cwd, title, config: {
       provider: ticket ? config.worker : config.orchestrator, modeId: ticket ? config.workerMode : config.orchestratorMode,
       systemPrompt: this.instructions(version, ticket), mcpServers: { superagent: { type: 'stdio',
@@ -64,7 +68,8 @@ export class PaseoSessions implements SessionPort {
     }, env: { ...Object.fromEntries(Object.entries(agentVariables(this.host.stateDir)).filter((entry): entry is [string, string] => entry[1] !== undefined)),
       GH_TOKEN: '', GITHUB_TOKEN: '', GIT_CONFIG_COUNT: '0', PATH: process.env.PATH ?? '',
       ...(ticket ? Object.fromEntries(this.host.environment(ticket).map(item => [item.key, item.value])) : {}) },
-      labels: { superagentHost: key(this.host.stateDir), superagentSession: binding.sessionId } }
+      labels: { superagentHost: key(this.host.stateDir), superagentSession: binding.sessionId,
+        ...(entryAgentId ? { 'paseo.parent-agent-id': entryAgentId } : {}) } }
     const value = { options, revision: version.revision }
     this.host.store.set(configs(id), value)
     return value

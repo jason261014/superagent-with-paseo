@@ -11,17 +11,19 @@ let store: Store
 beforeEach(() => { directory = mkdtempSync(join(tmpdir(), 'paseo-sessions-')); store = new Store(join(directory, 'db.sqlite')) })
 afterEach(() => { store.close(); rmSync(directory, { recursive: true, force: true }) })
 
-function setup() {
+function setup(overrides: Partial<Omit<PaseoSessionsHost, 'config'>> & { config?: Partial<PaseoSessionsHost['config']> } = {}) {
+  const config = { url: 'ws://127.0.0.1:6767/ws', orchestrator: 'claude/one', worker: 'claude/two',
+    orchestratorMode: 'auto', workerMode: 'auto', bridgeCommand: '/bin/bridge', bridgeNode: '/custom/node' }
   const host = {
     store,
     prompts: { current: () => ({ revision: 1, config: {} }), compose: () => 'orchestrator prompt', skills: () => [] },
     effects: { handle: vi.fn() },
     masterId: 'master',
     stateDir: directory,
-    config: { url: 'ws://127.0.0.1:6767/ws', orchestrator: 'claude/one', worker: 'claude/two',
-      orchestratorMode: 'auto', workerMode: 'auto', bridgeCommand: '/bin/bridge', bridgeNode: '/custom/node' },
     paseo: {}, journal: {}, bridge: { grant: () => 'token' },
     lifetime: new AbortController().signal, environment: () => [],
+    ...overrides,
+    config: { ...config, ...overrides.config },
   } as unknown as PaseoSessionsHost
   return new PaseoSessions(host)
 }
@@ -31,6 +33,16 @@ const ticket = { id: 'ticket-1', title: 'Work', mandate: { strength: 'explicit' 
 const assignment = { id: 'assignment-1' } as unknown as Assignment
 
 describe('Paseo worker parent labels', () => {
+  it('labels the orchestrator as a child without requiring the entry agent to be a live caller', async () => {
+    const create = vi.fn(async (options: Parameters<PaseoSessionsHost['paseo']['create']>[0]) => ({ agentId: 'orchestrator-1', cwd: options.cwd }))
+    const sessions = setup({ config: { entryAgentId: 'entry-agent-1' },
+      paseo: { create } as unknown as PaseoSessionsHost['paseo'],
+      journal: { claim: () => ({ action: 'execute' }), observe: vi.fn() } as unknown as PaseoSessionsHost['journal'] })
+    await sessions.ensure('master', '/shared/workspace', 'dsh-superagent orchestrator', 'orchestrator')
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({ cwd: '/shared/workspace',
+      labels: expect.objectContaining({ 'paseo.parent-agent-id': 'entry-agent-1' }) }))
+    expect(create.mock.calls[0]![0].parent).toBeUndefined()
+  })
   it('runs a worker in the orchestrator workspace and marks it as a delegated child', () => {
     const sessions = setup()
     store.set('paseo-session:master' as never, { agentId: 'orchestrator-1', revision: 1, options: { cwd: '/shared/workspace' } } as never)

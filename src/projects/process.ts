@@ -16,7 +16,7 @@ export interface ProjectProcess {
 }
 export interface ProjectProcessOptions {
   project: RegisteredProject; generation: string; nodeExecutable: string
-  runtimeEntry: string; childEntry: string; logDirectory: string
+  runtimeEntry: string; childEntry: string; logDirectory: string; entryAgentId?: string
 }
 export type ProjectProcessFactory = (options: ProjectProcessOptions) => ProjectProcess
 
@@ -61,7 +61,11 @@ export function spawnProjectProcess(options: ProjectProcessOptions): ProjectProc
       resolve({ code, signal: processSignal })
     })
   })
-  child.send({ ...identity, type: 'init', runtimeEntry: options.runtimeEntry, config: options.project.hostConfig }, error => {
+  const config = options.entryAgentId ? {
+    ...options.project.hostConfig,
+    paseo: { ...options.project.hostConfig.paseo, entryAgentId: options.entryAgentId },
+  } : options.project.hostConfig
+  child.send({ ...identity, type: 'init', runtimeEntry: options.runtimeEntry, config }, error => {
     if (error && !ended) { status = { phase: 'error', detail: 'PROJECT_INIT_FAILED' }; signal('SIGTERM') }
   })
   return {

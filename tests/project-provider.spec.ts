@@ -46,7 +46,7 @@ function setup() {
   })
   const events: ProviderEvent[] = []; connection.onEvent(event => events.push(event))
   const open = (id: string, cwd = '/' + id, persistence?: object) => connection.send({ type: 'session.open', requestId: 'open-' + id,
-    sessionId: id, config: { cwd, env: {}, mcpServers: {}, settings: {}, persist: true }, history: persistence ? 'replay' : 'skip',
+    sessionId: id, config: { cwd, env: { PASEO_AGENT_ID: 'entry-' + id }, mcpServers: {}, settings: {}, persist: true }, history: persistence ? 'replay' : 'skip',
     ...(persistence ? { persistence } : {}) } as ProviderInput)
   const send = (id: string) => connection.send({ type: 'session.prompt', sessionId: id,
     prompt: { clientMessageId: 'same-id', delivery: 'auto', input: { type: 'message', content: [{ type: 'text', text: id }] } } } as ProviderInput)
@@ -62,7 +62,7 @@ it('isolates identical message IDs and persists the project instead of the chang
     const event = fixture.events.find(event => event.type === 'session.opened' && event.sessionId === 'alpha')
     expect(event).toMatchObject({ persistence: { version: 2, data: { projectId: 'alpha', binding: fixture.bindings.alpha } } })
     await fixture.open('restored', '/beta', { version: 2, data: { projectId: 'alpha', binding: fixture.bindings.alpha } })
-    expect(fixture.manager.ensure).toHaveBeenLastCalledWith('alpha', 20_000)
+    expect(fixture.manager.ensure).toHaveBeenLastCalledWith('alpha', 20_000, 'entry-restored')
   } finally { await fixture.connection.close() }
   expect(fixture.manager.shutdown).not.toHaveBeenCalled(); expect(fixture.manager.act).not.toHaveBeenCalled()
 })

@@ -8,6 +8,7 @@ import { parseProjectManagerConfig, type ProjectDefinition, type ProjectManagerC
 import { createProjectRegistry, type ProjectRegistry, type RegisteredProject } from './registry.ts'
 import { openProjectCatalog, type ProjectCatalog } from './catalog.ts'
 import { openProjectIntents, type ProjectIntents } from './intents.ts'
+import { openProjectEntryAgents, type ProjectEntryAgents } from './entry-agents.ts'
 import { spawnProjectProcess, type ProjectProcess, type ProjectProcessFactory } from './process.ts'
 import { listenProjectManagement } from './management.ts'
 import type { ProjectAction, ProjectActionResult, ProjectSnapshot } from './protocol.ts'
@@ -19,7 +20,7 @@ export interface ProjectManager {
   list(): ProjectSnapshot[]
   status(id: string): ProjectSnapshot
   resolve(cwd: string): Promise<RegisteredProject>
-  ensure(id: string, budgetMs?: number): Promise<ProjectEndpoint>
+  ensure(id: string, budgetMs?: number, entryAgentId?: string): Promise<ProjectEndpoint>
   act(id: string, action: ProjectAction): Promise<ProjectActionResult>
   shutdown(budgetMs?: number): Promise<HostStop>
 }
@@ -34,7 +35,7 @@ export function createProjectManager(input: ProjectManagerConfig, options: { pro
   const config = parseProjectManagerConfig(input), registry = createProjectRegistry(config)
   const createProcess = options.processFactory ?? spawnProjectProcess
   const entries = new Map(registry.list().map(project => [project.id, { version: 0 } as Entry]))
-  let intents: ProjectIntents | undefined, release: (() => void) | undefined
+  let intents: ProjectIntents | undefined, entryAgents: ProjectEntryAgents | undefined, release: (() => void) | undefined
   let listener: { close(): Promise<void> } | undefined
   let closing = false, finalStop: Promise<void> | undefined, ready: Promise<void>
   const cancelled = new AbortController()
@@ -81,8 +82,10 @@ export function createProjectManager(input: ProjectManagerConfig, options: { pro
       if (closing || version !== entry.version || intents?.get(id) !== 'running') return
       registry.match(project.root)
       const generation = randomUUID()
+      const entryAgentId = entryAgents?.get(id)
       const process = createProcess({ project, generation, nodeExecutable: config.nodeExecutable,
-        runtimeEntry: config.runtimeEntry, childEntry: config.childEntry, logDirectory: join(config.managerDir, 'logs') })
+        runtimeEntry: config.runtimeEntry, childEntry: config.childEntry, logDirectory: join(config.managerDir, 'logs'),
+        ...(entryAgentId ? { entryAgentId } : {}) })
       entry.process = process; entry.generation = generation; entry.transition = undefined
       void process.ready.catch(() => {})
       return process
@@ -109,7 +112,7 @@ export function createProjectManager(input: ProjectManagerConfig, options: { pro
       registering.set(actual, work)
       try { return await work } finally { registering.delete(actual) }
     },
-    async ensure(id, budgetMs = 5000) {
+    async ensure(id, budgetMs = 5000, entryAgentId) {
       if (!Number.isFinite(budgetMs) || budgetMs < 0) throw new Error('PROJECT_INVALID_BUDGET')
       const work = (async () => {
         await ready
@@ -119,6 +122,8 @@ export function createProjectManager(input: ProjectManagerConfig, options: { pro
         if (intents!.get(id) === 'stopped') throw new Error('PROJECT_MANUALLY_STOPPED')
         if (entry.transition?.phase === 'error' && !entry.pending) throw new Error('PROJECT_RESTART_REQUIRED')
         if (entry.process && ['error', 'stopped'].includes(entry.process.status().phase) && !entry.pending) throw new Error('PROJECT_RESTART_REQUIRED')
+        // Paseo exposes one parent link per agent; keep the latest entry conversation for the next start.
+        if (entryAgentId) await entryAgents!.set(id, entryAgentId)
         if (intents!.get(id) === 'dormant') await intents!.set(id, 'running')
         const process = await launch(id)
         if (!process) throw new Error('PROJECT_STOPPED')
@@ -158,7 +163,7 @@ export function createProjectManager(input: ProjectManagerConfig, options: { pro
           await listener?.close()
           await Promise.allSettled([...entries.values()].map(entry => entry.pending))
           await Promise.all([...entries.values()].flatMap(entry => entry.process ? [entry.process.closed] : []))
-          await intents?.flush()
+          await Promise.all([intents?.flush(), entryAgents?.flush()])
           release?.(); release = undefined
         })()
       }
@@ -180,6 +185,7 @@ export function createProjectManager(input: ProjectManagerConfig, options: { pro
     }
     if (closing) return
     intents = openProjectIntents(config.managerDir)
+    entryAgents = openProjectEntryAgents(config.managerDir)
     catalog = openProjectCatalog(config.managerDir)
     for (const definition of catalog.list()) {
       if (registry.list().some(project => project.id === definition.id || project.root === definition.root)) continue

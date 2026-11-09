@@ -30,6 +30,18 @@ it('coalesces demand, keeps idle projects alive and remembers manual stop across
   expect(second.status('gamma').desired).toBe('dormant')
   expect(JSON.parse(readFileSync(join(fixture.config.managerDir, 'intents.json'), 'utf8')).projects).toEqual({ alpha: 'running', beta: 'stopped' })
 })
+it('persists the entry conversation and restores it as the next project process parent', async () => {
+  const fixture = setup(['alpha']), first = fixture.create(); await first.ready
+  await first.ensure('alpha', 5000, 'entry-agent-1')
+  expect(fixture.processFactory).toHaveBeenLastCalledWith(expect.objectContaining({ entryAgentId: 'entry-agent-1' }))
+  expect(JSON.parse(readFileSync(join(fixture.config.managerDir, 'entry-agents.json'), 'utf8')).projects)
+    .toEqual({ alpha: 'entry-agent-1' })
+  await first.shutdown(3000)
+  const second = fixture.create(); await second.ready
+  await vi.waitFor(() => expect(second.status('alpha').host.phase).toBe('ready'))
+  expect(fixture.processFactory).toHaveBeenCalledTimes(2)
+  expect(fixture.processFactory).toHaveBeenLastCalledWith(expect.objectContaining({ entryAgentId: 'entry-agent-1' }))
+})
 it('does not revive a project when stop overtakes a pending restart', async () => {
   const fixture = setup(), manager = fixture.create(); await manager.ready
   await manager.ensure('alpha')

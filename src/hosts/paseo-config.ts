@@ -18,6 +18,7 @@ export const HostConfigSchema = z.strictObject({
     }, 'Expected a loopback Paseo WebSocket URL'),
     orchestrator: role, worker: role, orchestratorMode: z.string().trim().min(1), workerMode: z.string().trim().min(1),
     bridgeCommand: AbsolutePathSchema, bridgeNode: AbsolutePathSchema,
+    entryAgentId: z.string().trim().min(1).max(128).regex(/^[A-Za-z0-9][A-Za-z0-9_-]*$/).optional(),
   }),
   flowWeb: z.strictObject({
     enabled: z.boolean().default(false), host: z.literal('127.0.0.1').default('127.0.0.1'),
