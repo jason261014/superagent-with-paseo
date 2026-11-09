@@ -10,6 +10,7 @@ import { ProjectPersistenceSchema } from './project-persistence.ts'
 interface Session {
   id: string; binding: ConversationBinding; cursor: number; closed: boolean; timer?: ReturnType<typeof setTimeout>
   tail: Promise<void>; emitted: Set<string>; receipts: Set<string>; pendingPrompts: Set<string>; interrupted: Set<string>; delay: number
+  turns: { turnId: string; clientMessageId: string; startSeq: number }[]
 }
 export interface ConnectionOptions {
   capabilities: readonly string[]; transport: ConversationTransport; pending: PendingInputs; pollMs?: number
@@ -36,15 +37,22 @@ export function createConversationConnection(options: ConnectionOptions): Provid
   }
   const emit = (event: ProviderEvent) => { if (!closed) for (const listener of listeners) listener(event) }
   const item = (session: Session, row: ProviderTimelineItem, at?: string) => {
-    if (session.closed || session.emitted.has(row.id)) return
+    if (session.closed || session.emitted.has(row.id)) return false
     emit({ type: 'timeline.item', sessionId: session.id, item: row, ...(at ? { timestamp: at } : {}) })
     session.emitted.add(row.id)
+    return true
   }
-  const show = (session: Session, event: ConversationEvent) => item(session, event.type === 'user'
-    ? { type: 'user_message', id: event.id, text: event.text, clientMessageId: event.clientMessageId }
-    : event.type === 'status'
-      ? { type: 'notification', id: event.id, level: event.level ?? 'info', message: event.text }
-      : { type: 'assistant_message', id: event.id, text: event.text }, event.at)
+  const show = (session: Session, event: ConversationEvent) => {
+    const shown = item(session, event.type === 'user'
+      ? { type: 'user_message', id: event.id, text: event.text, clientMessageId: event.clientMessageId }
+      : event.type === 'status'
+        ? { type: 'notification', id: event.id, level: event.level ?? 'info', message: event.text }
+        : { type: 'assistant_message', id: event.id, text: event.text }, event.at)
+    if (shown && event.type === 'assistant') {
+      const turn = session.turns.find(candidate => candidate.startSeq < event.seq)
+      if (turn) finishTurn(session, turn.turnId, 'completed')
+    }
+  }
   const notice = (session: Session, id: string, text: string, severity: 'info' | 'warning' | 'error' = 'warning') => {
     emit({ type: 'session.notice', sessionId: session.id, notice: { id, severity, title: text } })
   }
@@ -54,16 +62,40 @@ export function createConversationConnection(options: ConnectionOptions): Provid
     emit({ type: 'session.prompt_result', sessionId: session.id, clientMessageId,
       result: error ? { type: 'failed', error: { message: message(error) } } : { type: 'completed' } })
   }
+  const startTurn = (session: Session, clientMessageId: string, startSeq: number) => {
+    if (!session.pendingPrompts.delete(clientMessageId) || session.closed) return
+    const turnId = 'turn-' + clientMessageId
+    session.turns.push({ turnId, clientMessageId, startSeq })
+    emit({ type: 'session.prompt_result', sessionId: session.id, clientMessageId, result: { type: 'turn', turnId } })
+    emit({ type: 'session.turn', sessionId: session.id, turnId, state: 'started' })
+  }
+  const finishTurn = (session: Session, turnId: string, state: 'completed' | 'failed' | 'canceled', error?: unknown) => {
+    const index = session.turns.findIndex(turn => turn.turnId === turnId)
+    if (index < 0 || session.closed) return
+    session.turns.splice(index, 1)
+    emit({ type: 'session.turn', sessionId: session.id, turnId, state, ...(error ? { error: { message: message(error) } } : {}) })
+  }
+  const finishClientTurn = (session: Session, clientMessageId: string, state: 'completed' | 'failed' | 'canceled', error?: unknown) => {
+    const turn = session.turns.find(candidate => candidate.clientMessageId === clientMessageId)
+    if (turn) finishTurn(session, turn.turnId, state, error)
+  }
   const receipt = (session: Session, input: ConversationInput, value: ConversationReceiptView) => {
     const id = conversationRequestId(session.binding, input.clientMessageId)
     if (value.requestId !== id || value.clientMessageId !== input.clientMessageId || value.textHash !== conversationTextHash(input.text))
       throw new Error('LOCAL_REQUEST_CONFLICT')
     item(session, { type: 'user_message', id: `user:${value.triggerId}`, text: input.text, clientMessageId: input.clientMessageId }, value.at)
-    if (value.routing === 'rejected') notice(session, id, '请求未接单：' + (value.reason ?? '入口策略拒绝'), 'error')
-    else if (value.routing === 'pending') session.receipts.add(id)
-    else session.receipts.delete(id)
+    if (value.routing === 'rejected') {
+      notice(session, id, '请求未接单：' + (value.reason ?? '入口策略拒绝'), 'error')
+      result(session, input.clientMessageId, new Error('请求未接单：' + (value.reason ?? '入口策略拒绝')))
+    } else if (value.routing === 'ignored') {
+      notice(session, id, '请求已被忽略：' + (value.reason ?? '未匹配任何任务'), 'warning')
+      result(session, input.clientMessageId)
+    } else {
+      if (value.routing === 'pending') session.receipts.add(id)
+      else session.receipts.delete(id)
+      startTurn(session, input.clientMessageId, value.seq)
+    }
     pending.remove(input)
-    result(session, input.clientMessageId)
   }
   const reconcile = async (session: Session, input: ConversationInput) => {
     const id = conversationRequestId(session.binding, input.clientMessageId), found = await transport.receipt(id)
@@ -112,7 +144,14 @@ export function createConversationConnection(options: ConnectionOptions): Provid
           for (const id of [...session.receipts].slice(0, 20)) {
             const found = await transport.receipt(id); sameBinding(session.binding, found.binding)
             if (!found.receipt) throw new Error('LOCAL_CONVERSATION_GAP')
-            if (found.receipt.routing === 'rejected') notice(session, id, '请求未接单：' + (found.receipt.reason ?? '入口策略拒绝'), 'error')
+            if (found.receipt.routing === 'rejected') {
+              notice(session, id, '请求未接单：' + (found.receipt.reason ?? '入口策略拒绝'), 'error')
+              finishClientTurn(session, found.receipt.clientMessageId, 'failed', new Error('请求未接单：' + (found.receipt.reason ?? '入口策略拒绝')))
+            }
+            if (found.receipt.routing === 'ignored') {
+              notice(session, id, '请求已被忽略：' + (found.receipt.reason ?? '未匹配任何任务'), 'warning')
+              finishClientTurn(session, found.receipt.clientMessageId, 'completed')
+            }
             if (found.receipt.routing !== 'pending') session.receipts.delete(id)
           }
           session.delay = pollMs
@@ -137,7 +176,7 @@ export function createConversationConnection(options: ConnectionOptions): Provid
     if (restored) sameBinding(restored, binding)
     if (closed) return
     const session: Session = { id: input.sessionId, binding, cursor: 0, closed: false, tail: Promise.resolve(), emitted: new Set(),
-      receipts: new Set(), pendingPrompts: new Set(), interrupted: new Set(), delay: pollMs }
+      receipts: new Set(), pendingPrompts: new Set(), interrupted: new Set(), delay: pollMs, turns: [] }
     sessions.set(session.id, session)
     try {
     emit({ type: 'session.opened', requestId: input.requestId, sessionId: session.id, capabilities: [...capabilities], restoration: 'core',
@@ -193,6 +232,7 @@ export function createConversationConnection(options: ConnectionOptions): Provid
           emit({ type: 'session.can_stop_runtime', requestId: input.requestId, sessionId: session.id, canStop: false }); return
         }
         if (input.type === 'session.interrupt') {
+          for (const turn of session.turns.splice(0)) emit({ type: 'session.turn', sessionId: session.id, turnId: turn.turnId, state: 'canceled' })
           for (const id of session.pendingPrompts) { session.interrupted.add(id); result(session, id, new Error('输入等待已中断，任务状态以接收记录为准')) }
           emit({ type: 'request.completed', requestId: input.requestId }); return
         }
