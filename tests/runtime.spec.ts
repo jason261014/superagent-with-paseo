@@ -1058,7 +1058,11 @@ it('reports each setup problem where the operator fixes it, and checks the agent
   expect(local.health.runtime).toMatchObject({ state: 'ready' })
   expect(readFileSync(join(directory, 'worker-gitconfig'), 'utf8')).toContain('email = local@localhost')
   expect(readFileSync(join(directory, 'worker-bin', 'gh'), 'utf8')).toContain('gh is unavailable')
-  expect(Object.keys(local.prompts.preview(local.prompts.current().config).skills)).not.toContain('github')
+  const localPreview = local.prompts.preview(local.prompts.current().config)
+  expect(Object.keys(localPreview.skills)).not.toContain('github')
+  expect(localPreview.orchestrator).toContain('no GitHub repository configured')
+  expect(localPreview.orchestrator).toContain('## Local mode')
+  expect(localPreview.worker).toContain('## Local mode')
   // A broken Feishu bot leaves Feishu out and says why; GitHub work goes on.
   answers = { ...valid, [`${BOT()} config strict-mode`]: 'strict-mode: off (source: profile)' }
   const next = await restart()

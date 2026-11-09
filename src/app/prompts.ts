@@ -43,6 +43,8 @@ export const defaultPrompts = (): PromptConfig => ({ ...teamDefaults, skills: {}
 
 const ENVIRONMENT_HEADING = 'Execution environment (from this installation\'s settings; it takes precedence over any repository or account named elsewhere in these instructions; an empty value means that part is not configured here). The prepare command of a ticket directory reads the same variables:'
 const POLICY_HEAD = '## Policy\nPolicy version {version}; accept mode {mode}. The accept mode and the rules decide proactive candidates only: an explicit request is routed as dispatch says, in any mode and whatever the rules.'
+const LOCAL_DELIVERY = 'Deliver changes in the workspace itself, as commits or branches the person can review locally. Do not mention, claim or promise a pull request, GitHub review or merge: this project has no GitHub repository configured.'
+const LOCAL_MODE = '## Local mode\nThis project has no GitHub repository configured. Work in the workspace itself. Do not push, open a pull request, or claim PR, review or merge delivery. Report the local branch or commit and the checks you ran; state explicitly when a requested outcome needs GitHub.'
 type Role = 'orchestrator' | 'worker'
 /** A built-in part a team may override: the roles that read it, its text, and the placeholders a template's override keeps. */
 interface BuiltInPart { roles: readonly Role[]; text: string; placeholders?: readonly string[] }
@@ -140,7 +142,9 @@ export class Prompts {
   }
   /** A role's prompt; the main Session's Policy section follows the settings as they are now, at each model request. */
   compose(config: PromptConfig, role: Role, variables = this.environment()): string {
-    return composePrompt(config, role, environmentSection(config, variables), role === 'orchestrator' ? policySection(this.store.settings(), config) : undefined)
+    const effective = this.applicable(config)
+    const prompt = composePrompt(effective, role, environmentSection(effective, variables), role === 'orchestrator' ? policySection(this.store.settings(), effective) : undefined)
+    return this.github() ? prompt : prompt + '\n\n' + LOCAL_MODE
   }
   /** Returns skills to register in every Session: built-in Source skills (`feishu` only when a Feishu bot is configured) followed by team skills. */
   skills(config: PromptConfig): [string, string][] {
@@ -193,12 +197,14 @@ export class Prompts {
     })
   }
   preview(value: unknown) {
-    const config = this.validate(value)
+    const config = this.applicable(this.validate(value))
     const environment = environmentSection(config, this.environment()), policy = policySection(this.store.settings(), config)
-    return { orchestrator: composePrompt(config, 'orchestrator', environment, policy), worker: composePrompt(config, 'worker', environment),
+    const suffix = this.github() ? '' : '\n\n' + LOCAL_MODE
+    return { orchestrator: composePrompt(config, 'orchestrator', environment, policy) + suffix, worker: composePrompt(config, 'worker', environment) + suffix,
       parts: { orchestrator: promptParts(config, 'orchestrator', environment, policy), worker: promptParts(config, 'worker', environment) },
       skills: Object.fromEntries(this.skills(config)), scope: 'Team sections, skills, and overrides of built-in parts, which follow their built-in text until overridden. Workers additionally inherit the host prompt and repository AGENTS.md. Prompt text changes what the agents are told, not what dsh-superagent allows: tool permissions, the gate and account wrappers stay.' }
   }
+  private applicable(config: PromptConfig): PromptConfig { return this.github() ? config : { ...config, delivery: LOCAL_DELIVERY } }
   save(value: unknown, baseRevision: number, source: SettingsOrigin): PromptVersion {
     const config = this.validate(value)
     return this.store.atomic(() => {
