@@ -21,9 +21,11 @@ export interface ConversationReceiptView extends ConversationReceipt {
   routing: 'pending' | 'routed' | 'ignored' | 'rejected'; reason?: string; ticketId?: string
 }
 export interface ConversationEvent {
-  seq: number; id: string; at: string; type: 'user' | 'assistant'; text: string
+  seq: number; id: string; at: string; type: 'user' | 'assistant' | 'status'; text: string
   clientMessageId?: string; triggerId?: string; ticketId?: string
+  level?: 'info' | 'warning' | 'error'; kind?: string
 }
+export interface ConversationStatus { id: string; at: string; text: string; level: 'info' | 'warning' | 'error'; kind: string; ticketId?: string }
 export interface ConversationPage {
   binding: ConversationBinding; items: ConversationEvent[]; nextCursor: number; highWater: number; hasMore: boolean
 }

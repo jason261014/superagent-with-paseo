@@ -9,6 +9,7 @@ import type { Retry } from './sources/github.ts'
 import type { OutboundMessage } from './core/index.ts'
 import type { ConversationBinding, ConversationReceipt } from './local/protocol.ts'
 import type { ConversationIndex } from './local/conversation.ts'
+import type { ConversationStatus } from './local/protocol.ts'
 
 /** Key of a KV record whose value has type `V`; a plain string represents an untyped key. */
 export type Key<V> = string & { readonly __value?: V }
@@ -29,6 +30,7 @@ export const KV = {
   conversation: { binding: record<ConversationBinding>('conversation-binding'), seq: record<number>('conversation-seq'),
     receipt: family<ConversationReceipt>('conversation-receipt:'), channel: family<string>('conversation-channel:'),
     trigger: family<string>('conversation-trigger:'), reply: family<number>('conversation-reply:'),
+    status: family<{ seq: number; status: ConversationStatus }>('conversation-status:'),
     event: family<ConversationIndex, [seq: number]>('conversation-event:', seq => String(seq).padStart(16, '0')) },
   /** Store: current database schema version. */
   store: { schema: record<number>('schema') },

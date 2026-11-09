@@ -16,7 +16,7 @@ node bin/superagent-project.mjs --manager-dir /Users/anxiaojie/.dsh/state/supera
 node bin/superagent-project.mjs --manager-dir /Users/anxiaojie/.dsh/state/superagent-manager start legacy
 ```
 
-`start`/`restart` 返回 accepted 只代表运行操作已接受；等 host.phase=ready 后再恢复对话。首次启动可能超过前台 5 秒等待，界面会返回 `PROJECT_STARTING`；后台仍继续启动，确认 ready 后 reload/reopen 原对话。已经有接收记录的输入不要换 ID 重发。
+`start`/`restart` 返回 accepted 只代表运行操作已接受；等 host.phase=ready 后再恢复对话。Provider 首次打开最多等待 20 秒；仍超过时返回 `PROJECT_STARTING`，后台继续启动，确认 ready 后 reload/reopen 原对话。已经有接收记录的输入不要换 ID 重发。
 
 首次使用项目时按需启动，首版没有自动空闲回收。关闭对话不会停止项目；手动 stop 后，打开对话也不会自动撤销停止，必须显式 start。插件/daemon 重启会恢复此前运行的项目，手动停止和从未使用的项目保持停止。单个项目的启动错误不停止其他已运行项目。
 
@@ -113,6 +113,10 @@ paseo plugin enable superagent --host 127.0.0.1:6767
 在 Paseo 新建 agent/session 时，把 provider 选择为 **Superagent**，然后直接发送普通文本。第一次消息会按现有 Local Source、Policy 和 coordinator 流程创建或等待接单；协调者的确认、追问和结果会回到同一个 Paseo 窗口。收到追问后，继续在同一个窗口回复即可；新的一轮独立任务仍使用新的 request 身份，不会自动串到旧 Ticket。
 
 每个 Ticket 的 worker 会作为 orchestrator 的 delegated agent 出现在同一个 Paseo workspace 中。worker 进程的初始目录是 orchestrator 的 workspace 目录，Ticket 自己的执行目录通过 `DSH_SUPERAGENT_DIR` 传入；worker 指令要求它在执行任何命令前先 `cd "$DSH_SUPERAGENT_DIR"`。
+
+### 异步状态
+
+Paseo 对话时间线会把 Superagent 的后台进度显示为 notification 项，而不是 assistant 文本：请求已提交、Ticket 已创建、Worker 已启动、执行中摘要、等待补充、受阻/失败、完成和 Ticket 结束。状态事件与 user/assistant 事件一起持久化在项目数据库的 conversation event 中，重开对话、插件重载或 daemon 重启后可以恢复；它们不会替代协调者的确认、追问和最终结果。
 
 Paseo provider 目前只接受纯文本消息。图片、文件、结构化 output schema 和其他输入类型会被拒绝。Paseo 窗口的中断按钮只中断当前前台输入等待；已经被宿主接收的 Ticket 仍会继续执行。要停止已接收的 Ticket，请在同一窗口发送明确的停止请求，让协调者按原有工具流程处理。
 

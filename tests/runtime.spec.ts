@@ -209,7 +209,11 @@ it('routes independent Paseo conversation inputs, scoped context, follow-ups, re
   })
   const accepted = await route({ kind: 'accept', trigger_id: first.triggerId, title: 'A/B result', worktree_name: 'ab-result', acknowledgement: 'Creating the result.' })
   const ticketId = (accepted.ticket as { ticket_id: string }).ticket_id, worker = `worker-${ticketId}`
+  const acceptedPage = await localCall(directory, 'GET', '/paseo/events?after=0') as ConversationPage
+  expect(acceptedPage.items).toContainEqual(expect.objectContaining({ type: 'status', kind: 'ticket.created', text: expect.stringContaining('A/B result') }))
   await runTool(worker, 'orchestrator_report', { state: 'progress', summary: 'Need choice', human_action: 'A or B?' })
+  const progressPage = await localCall(directory, 'GET', '/paseo/events?after=0') as ConversationPage
+  expect(progressPage.items).toContainEqual(expect.objectContaining({ type: 'status', kind: 'ticket.reported', text: '执行中：Need choice' }))
   await runTool(runtime.masterId, 'orchestrator_reply', { ticket_id: ticketId, purpose: 'attention', human_action: 'A or B?', text: 'A or B?' })
   const second = await submit('conversation-2', 'Investigate an unrelated issue')
   expect(runtime.store.triggers.disposition(second.triggerId)?.fanout).toEqual([])
@@ -225,6 +229,7 @@ it('routes independent Paseo conversation inputs, scoped context, follow-ups, re
   expect(runtime.store.tickets.get(ticketId)!.ended?.outcome).toBe('completed')
   const page = await localCall(directory, 'GET', '/paseo/events?after=0') as ConversationPage
   expect(page.items.filter(item => item.type === 'assistant').map(item => item.text)).toEqual(['Creating the result.', 'A or B?', 'Investigating the issue.', 'Result A created.'])
+  expect(page.items).toContainEqual(expect.objectContaining({ type: 'status', kind: 'ticket.reported', text: '已完成：Result A created' }))
   const scoped = await runTool(runtime.masterId, 'orchestrator_read', { resource: `conversation/${binding.conversationId}/through/1` })
   expect(scoped).toMatchObject({ items: [{ text: 'Create an A/B result file' }], next_offset: null })
   await expect(runTool(`worker-${otherId}`, 'orchestrator_read', { resource: `conversation/${binding.conversationId}/through/1` })).rejects.toThrow()

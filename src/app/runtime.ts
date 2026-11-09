@@ -5,7 +5,7 @@ import { sourceTrigger } from '../executor/shared.ts'
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { lockSync } from 'proper-lockfile'
-import { Engine, key, reasonText, type EngineForSettings, type ReceiveResult, type Ticket, type Trigger } from '../core/index.ts'
+import { Engine, key, reasonText, type DomainEvent, type EngineForSettings, type ReceiveResult, type Ticket, type Trigger } from '../core/index.ts'
 import { allowedSender, settingsPolicy } from '../policy.ts'
 import { SourceRegistry } from '../sources/registry.ts'
 import { createLocalSource, type LocalRequest } from '../sources/local.ts'
@@ -42,6 +42,7 @@ import type { ExecutorToolsHost } from './tools/executor.ts'
 
 // Source plugins interact with dsh-superagent exclusively through the `SourceHost` service interface.
 const now = (): string => new Date().toISOString()
+const clip = (text: string | undefined): string => text ? text.replace(/\s+/g, ' ').trim().slice(0, 500) : ''
 
 /**
  * Composition root of dsh-superagent that connects `Store`, `Setup`, `Engine`, `SourceRegistry`, `Effects`, `Outbox`, `Passes`, `Sessions`, `Settings`, `Prompts`, `DshExecutor`, and `MasterAssessor`.
@@ -154,6 +155,7 @@ export class Runtime implements SourceHost {
       const policy = () => settingsPolicy(store.settings(), sources)
       const engine = this.engine = new Engine({ repo: store, scope: sources, policy, assessor, executor,
         outbox, prepareTicket: (ticket, outcome) => executor.prepare(ticket, outcome), emit: event => {
+          this.recordConversationStatus(event)
           // Notify the main Session only about domain events it did not initiate itself.
           const notice = this.quiet ? undefined : eventNotice(event, id => store.tickets.get(id))
           if (notice) sessions.notify(...notice)
@@ -221,6 +223,26 @@ export class Runtime implements SourceHost {
     return { configured: this.configured(), paused: this.paused(),
       accepting: !this.closing() && !this.lifetime.aborted && !!source?.enabled && source.config.acceptRequests === true,
       actor: `uid:${process.getuid?.()}` }
+  }
+  private recordConversationStatus(event: DomainEvent): void {
+    if (event.type !== 'ticket.created' && event.type !== 'ticket.reported' && event.type !== 'ticket.ended' && event.type !== 'assignment.started') return
+    const ticket = this.store.tickets.get(event.data.ticketId)
+    if (!ticket || this.store.get(KV.conversation.trigger(ticket.origin.triggerId)) === undefined) return
+    let text: string, level: 'info' | 'warning' | 'error', kind: string
+    if (event.type === 'ticket.created') {
+      text = `已创建 Ticket「${ticket.title}」`; level = 'info'; kind = 'ticket.created'
+    } else if (event.type === 'assignment.started') {
+      text = `Worker 已启动：${ticket.title}`; level = 'info'; kind = 'worker.started'
+    } else if (event.type === 'ticket.reported') {
+      const labels: Record<string, string> = { progress: '执行中', waiting: '等待补充', blocked: '受阻', failed: '失败', ready: '已完成', dropped: '已放弃' }
+      text = `${labels[event.data.state] ?? event.data.state}：${clip(event.data.summary) || ticket.title}`
+      level = event.data.state === 'failed' ? 'error' : ['blocked', 'dropped'].includes(event.data.state) ? 'warning' : 'info'; kind = 'ticket.reported'
+    } else {
+      text = `Ticket 已结束：${event.data.outcome}${event.data.reason ? `（${clip(event.data.reason)}）` : ''}`
+      level = event.data.outcome === 'completed' ? 'info' : 'warning'; kind = 'ticket.ended'
+    }
+    this.conversation.recordStatus({ id: `${event.type}:${event.data.ticketId}:${'assignmentId' in event.data ? event.data.assignmentId : ''}:${event.at}`,
+      at: event.at, text, level, kind, ticketId: event.data.ticketId })
   }
   idle(): Promise<void> { return this.passes.idle() }
   pump(): Promise<void> { return this.passes.pump() }

@@ -7,7 +7,8 @@ const Receipt = z.object({ requestId: z.string(), clientMessageId: z.string(), t
   seq: z.number().int().positive(), at: z.string(), result: z.enum(['stored', 'duplicate', 'filtered']),
   routing: z.enum(['pending', 'routed', 'ignored', 'rejected']), reason: z.string().optional(), ticketId: z.string().optional() }).strict()
 const Page = z.object({ binding: ConversationBinding, items: z.array(z.object({ seq: z.number().int().positive(), id: z.string(), at: z.string(),
-  type: z.enum(['user', 'assistant']), text: z.string(), clientMessageId: z.string().optional(), triggerId: z.string().optional(), ticketId: z.string().optional() }).strict()),
+  type: z.enum(['user', 'assistant', 'status']), text: z.string(), clientMessageId: z.string().optional(), triggerId: z.string().optional(), ticketId: z.string().optional(),
+  level: z.enum(['info', 'warning', 'error']).optional(), kind: z.string().optional() }).strict()),
   nextCursor: z.number().int().nonnegative(), highWater: z.number().int().nonnegative(), hasMore: z.boolean() }).strict()
 export interface ConversationTransport {
   binding(create: boolean): Promise<ConversationBinding>

@@ -28,7 +28,9 @@ it('deduplicates normalized inputs, rejects conflicts and gives each message an 
   const two = conversation.receive({ ...input, clientMessageId: 'm-2', text: 'new task' }, receive)
   expect(store.triggers.get(one.triggerId)!.threads).not.toEqual(store.triggers.get(two.triggerId)!.threads)
   expect(receive).toHaveBeenCalledTimes(2)
-  expect(conversation.events().items.map(item => item.text)).toEqual(['hello', 'new task'])
+  const events = conversation.events().items
+  expect(events.filter(item => item.type !== 'status').map(item => item.text)).toEqual(['hello', 'new task'])
+  expect(events.filter(item => item.type === 'status').map(item => item.kind)).toEqual(['request.pending', 'request.pending'])
   expect(() => conversation.receive({ ...input, binding: { ...binding, hostId: '0'.repeat(32) } }, receive)).toThrow('LOCAL_CONVERSATION_MISMATCH')
   expect(() => conversation.receive({ ...input, actor: 'fake' } as never, receive)).toThrow()
 })
@@ -41,14 +43,21 @@ it('rolls back admission and persists reply indexing atomically across database 
   const reply = { id: 'reply-1', channel: trigger.channel!, text: 'done', kind: 'reply' as const }
   const send = () => local.kind.channel!.send({} as never, reply)
   await send(); await send()
-  expect(conversation.events().items).toHaveLength(2)
+  expect(conversation.events().items.filter(item => item.type !== 'status')).toHaveLength(2)
   await local.kind.channel!.send({} as never, { ...reply, id: 'other', channel: localTrigger({ requestId: 'cli', text: 'cli' }).channel! })
-  expect(conversation.events().items).toHaveLength(2)
+  expect(conversation.events().items.filter(item => item.type !== 'status')).toHaveLength(2)
   const reopened = new Store(db); stores.push(reopened)
   const again = new LocalConversation(reopened)
   expect(again.binding()).toEqual(binding)
   expect(again.events()).toEqual(conversation.events())
   expect(again.receipt(receipt.requestId)).toMatchObject({ seq: 1, routing: 'pending' })
+})
+it('records status notifications once and replays them with the user messages', () => {
+  const { conversation } = setup()
+  const status = { id: 'status-1', at: '2026-11-09T00:00:00.000Z', text: 'Ticket 已创建', level: 'info' as const, kind: 'ticket.created' }
+  expect(conversation.recordStatus(status)).toBe(1)
+  expect(conversation.recordStatus(status)).toBeUndefined()
+  expect(conversation.events().items).toEqual([expect.objectContaining({ type: 'status', text: 'Ticket 已创建', level: 'info', kind: 'ticket.created' })])
 })
 it('pages under a fixed upper bound, rejects gaps and invalid cursors, and limits response bytes', () => {
   const { conversation, binding, receive, store } = setup()
@@ -58,8 +67,9 @@ it('pages under a fixed upper bound, rejects gaps and invalid cursors, and limit
   expect(Buffer.byteLength(JSON.stringify(page))).toBeLessThan(512 * 1024)
   expect(page.hasMore).toBe(true)
   expect(conversation.events(0, 1, 1)).toMatchObject({ highWater: 1, nextCursor: 1, hasMore: false })
-  expect(() => conversation.events(11)).toThrow('LOCAL_CONVERSATION_CURSOR')
-  expect(() => conversation.events(0, 11)).toThrow('LOCAL_CONVERSATION_CURSOR')
+  const highWater = conversation.events().highWater
+  expect(() => conversation.events(highWater + 1)).toThrow('LOCAL_CONVERSATION_CURSOR')
+  expect(() => conversation.events(0, highWater + 1)).toThrow('LOCAL_CONVERSATION_CURSOR')
   store.delete(KV.conversation.event(2))
-  expect(() => conversation.events(1, 2)).toThrow('LOCAL_CONVERSATION_GAP')
+  expect(() => conversation.events(1, 3)).toThrow('LOCAL_CONVERSATION_GAP')
 })

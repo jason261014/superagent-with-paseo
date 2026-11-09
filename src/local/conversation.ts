@@ -6,9 +6,11 @@ import { type OutboundMessage, type ReceiveResult } from '../core/index.ts'
 import { KV } from '../kv.ts'
 import { localTrigger, type LocalRequest } from '../sources/local.ts'
 import { ConversationBinding, ConversationInput, conversationRequestId, conversationTextHash,
-  type ConversationEvent, type ConversationPage, type ConversationReceipt, type ConversationReceiptView } from './protocol.ts'
+  type ConversationEvent, type ConversationPage, type ConversationReceipt, type ConversationReceiptView,
+  type ConversationStatus } from './protocol.ts'
 
-export type ConversationIndex = { at: string } & ({ type: 'user'; requestId: string } | { type: 'assistant'; replyId: string })
+export type ConversationIndex = { at: string } &
+  ({ type: 'user'; requestId: string } | { type: 'assistant'; replyId: string } | { type: 'status'; statusId: string })
 
 /** Maps one Paseo conversation to Local Source requests and a durable replay index. */
 export class LocalConversation {
@@ -45,6 +47,7 @@ export class LocalConversation {
       // Mapping is committed atomically with admission, so even synchronous replies can find their conversation.
       this.store.set(KV.conversation.channel(trigger.channel!.thread), requestId)
       this.store.set(KV.conversation.trigger(trigger.id), requestId)
+      this.statusIndex({ id: `request:${requestId}:pending`, at: trigger.at, text: '请求已提交，等待 Superagent 处理', level: 'info', kind: 'request.pending' })
       const result = receive({ requestId, threadId: requestId, text: parsed.text })
       const receipt: ConversationReceipt = { requestId, triggerId: trigger.id, clientMessageId: parsed.clientMessageId,
         textHash: conversationTextHash(parsed.text), seq, at: trigger.at, result }
@@ -70,6 +73,17 @@ export class LocalConversation {
     const seq = this.append({ type: 'assistant', replyId: message.id, at: new Date().toISOString() })
     this.store.set(KV.conversation.reply(message.id), seq)
   }
+  /** Records an asynchronous status event the UI replays through the normal events page. Deduplicates by stable id. */
+  recordStatus(status: ConversationStatus): number | undefined {
+    return this.store.atomic(() => this.statusIndex(status))
+  }
+  private statusIndex(status: ConversationStatus): number | undefined {
+    const key = KV.conversation.status(status.id)
+    if (this.store.get(key) !== undefined) return undefined
+    const seq = this.append({ type: 'status', statusId: status.id, at: status.at })
+    this.store.set(key, { seq, status })
+    return seq
+  }
   private append(event: ConversationIndex): number {
     const seq = (this.store.get(KV.conversation.seq) ?? 0) + 1
     this.store.set(KV.conversation.event(seq), event)
@@ -92,11 +106,17 @@ export class LocalConversation {
         if (!receipt || !trigger) throw new Error('LOCAL_CONVERSATION_GAP')
         item = { seq, id: `user:${trigger.id}`, type: 'user', text: trigger.text, at: ref.at,
           clientMessageId: receipt.clientMessageId, triggerId: trigger.id }
-      } else {
+      } else if (ref.type === 'assistant') {
         const reply = this.store.get(KV.local.reply(ref.replyId))
         if (!reply) throw new Error('LOCAL_CONVERSATION_GAP')
         item = { seq, id: `reply:${reply.id}`, type: 'assistant', text: reply.text, at: ref.at,
           ...(reply.ticketId ? { ticketId: reply.ticketId } : {}) }
+      } else {
+        const stored = this.store.get(KV.conversation.status(ref.statusId))
+        if (!stored) throw new Error('LOCAL_CONVERSATION_GAP')
+        item = { seq, id: `status:${ref.statusId}`, type: 'status', text: stored.status.text, at: ref.at,
+          level: stored.status.level, kind: stored.status.kind,
+          ...(stored.status.ticketId ? { ticketId: stored.status.ticketId } : {}) }
       }
       const size = Buffer.byteLength(JSON.stringify(item))
       if (bytes + size > 500_000) break

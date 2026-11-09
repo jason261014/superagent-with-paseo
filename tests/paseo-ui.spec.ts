@@ -89,6 +89,13 @@ it('completes input after durable receipt and emits a later reply without anothe
   await h.send('another', 'm2')
   expect(items(h.events).map(event => event.item.id)).toContain('user:m2')
 })
+it('turns asynchronous status rows into Paseo timeline notifications', async () => {
+  vi.useFakeTimers()
+  const h = setup(); await h.open(); await h.send()
+  h.rows.push({ seq: 2, id: 'status:ticket-1', type: 'status', text: 'Ticket 已创建', at: '2026-11-06T00:00:01.000Z', level: 'info', kind: 'ticket.created' })
+  await vi.advanceTimersByTimeAsync(10)
+  expect(items(h.events).at(-1)).toMatchObject({ type: 'timeline.item', item: { type: 'notification', level: 'info', message: 'Ticket 已创建' } })
+})
 it('reconciles a lost submit response with the same identity and rejects changed replay text', async () => {
   const original = setup()
   await original.open()

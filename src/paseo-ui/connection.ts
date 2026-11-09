@@ -42,7 +42,9 @@ export function createConversationConnection(options: ConnectionOptions): Provid
   }
   const show = (session: Session, event: ConversationEvent) => item(session, event.type === 'user'
     ? { type: 'user_message', id: event.id, text: event.text, clientMessageId: event.clientMessageId }
-    : { type: 'assistant_message', id: event.id, text: event.text }, event.at)
+    : event.type === 'status'
+      ? { type: 'notification', id: event.id, level: event.level ?? 'info', message: event.text }
+      : { type: 'assistant_message', id: event.id, text: event.text }, event.at)
   const notice = (session: Session, id: string, text: string, severity: 'info' | 'warning' | 'error' = 'warning') => {
     emit({ type: 'session.notice', sessionId: session.id, notice: { id, severity, title: text } })
   }
