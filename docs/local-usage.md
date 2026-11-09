@@ -118,6 +118,8 @@ paseo plugin enable superagent --host 127.0.0.1:6767
 
 Paseo 对话时间线会把 Superagent 的后台进度显示为 notification 项，而不是 assistant 文本：请求已提交、Ticket 已创建、Worker 已启动、执行中摘要、等待补充、受阻/失败、完成和 Ticket 结束。状态事件与 user/assistant 事件一起持久化在项目数据库的 conversation event 中，重开对话、插件重载或 daemon 重启后可以恢复；它们不会替代协调者的确认、追问和最终结果。
 
+Provider 收单后会保持当前 Paseo turn 处于运行态，直到协调者的第一条 assistant 回复到达；因此 Paseo 会显示“工作了 Xs”这类运行时长，而不是在本地收单成功后立刻 idle。只有被忽略或拒绝的请求会直接结束该 turn。
+
 Paseo provider 目前只接受纯文本消息。图片、文件、结构化 output schema 和其他输入类型会被拒绝。Paseo 窗口的中断按钮只中断当前前台输入等待；已经被宿主接收的 Ticket 仍会继续执行。要停止已接收的 Ticket，请在同一窗口发送明确的停止请求，让协调者按原有工具流程处理。
 
 命令行也可以验证 provider 是否可用：
