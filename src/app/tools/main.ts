@@ -1,11 +1,10 @@
 /** Main Session tools for routing triggers, assessing candidates, sending replies, and updating settings and prompts. */
 import type { Context } from '@deepseek-ai/cordis'
-import type { Agent } from '@deepseek-ai/dsh-agent'
 import { z } from 'zod'
 import { UserError, followupOwners, key, reasonText, type Decision, type DecisionKind, type EngineForMainSession, type EngineForPeople }
   from '../../core/index.ts'
 import { IM_WORDS, NOTE_WORDS, wordCount } from '../../infra/text.ts'
-import { AssessmentSchema, EvalReadSchema, WorktreeNameSchema, type MasterAssessor } from '../assessment.ts'
+import { AssessmentSchema, EvalReadSchema, WorktreeNameSchema, type AssessmentImageReader, type MasterAssessor } from '../assessment.ts'
 import { ticketCard } from '../cards.ts'
 import { PromptConfigSchema, savePrompts, type Prompts } from '../prompts.ts'
 import { readResource, type MainResourceHost, type ResourceHost } from '../resources.ts'
@@ -18,7 +17,7 @@ const RoutingNoteSchema = z.string().trim()
   .refine(text => wordCount(text) <= NOTE_WORDS, `Routing note must not exceed ${NOTE_WORDS} words (Chinese uses word segmentation). Shorten it; do not split it across deliveries.`)
   .describe(`Optional routing background or explicit human constraint, at most ${NOTE_WORDS} words. Never add implementation instructions or replace the original source.`)
 export interface MainToolsHost {
-  readonly context: Context
+  readonly logger: Pick<Context['logger'], 'warn'>
   readonly engine: Pick<EngineForMainSession, 'decide' | 'attach' | 'reply' | 'requestStatus' | 'note'> & EngineForPeople
   readonly store: Pick<Store, 'tickets' | 'triggers' | 'threads' | 'atomic' | 'replyStatus' | 'settings'>
   readonly prompts: Pick<Prompts, 'preview' | 'save'>
@@ -142,7 +141,7 @@ function routeTool(host: MainToolsHost): Tool {
             ...(ticket ? { ticket: ticketCard(ticket) } : {}) }
         } catch (error) {
           if (error instanceof UserError) return { ...head, refused: error.message }
-          host.context.logger.warn('dsh-superagent could not route trigger %s: %s', item.trigger_id, String(error))
+          host.logger.warn('dsh-superagent could not route trigger %s: %s', item.trigger_id, String(error))
           return { ...head, refused: `Not recorded: ${error instanceof Error ? error.message : String(error)}; retry this item` }
         }
       })
@@ -151,8 +150,8 @@ function routeTool(host: MainToolsHost): Tool {
     },
   })
 }
-/** Builds the main Session's tools; `agent` scopes prompt preview resources to that Session. */
-export function mainTools(host: MainToolsHost, agent: Agent): Tool[] {
+/** Builds unchanged main tools for a session identity and its optional attachment capability. */
+export function mainTools(host: MainToolsHost, session: { id: string; readImage?: AssessmentImageReader }): Tool[] {
   const resources: MainResourceHost = { ...host.resources, sessions: host.sessions, settings: host.settings }
   return [
     readTool('Read one page of a resource the resource parameter lists, such as the ticket list or a ticket. Follow next_offset, and next_resource where a page names one.',
@@ -209,7 +208,7 @@ export function mainTools(host: MainToolsHost, agent: Agent): Tool[] {
       name: 'orchestrator_eval_read',
       description: 'Read more of a candidate\'s context, always with its trigger_id: a message or stub whole by message_id, an image by image_id, the root, the parent, a thread page by cursor, or a file or directory by path.',
       schema: EvalReadSchema,
-      execute: async (read, signal) => host.assessor.read(agent, read, signal),
+      execute: async (read, signal) => host.assessor.read(read, signal, session.readImage),
     }),
     tool({
       name: 'orchestrator_eval_decide',
@@ -287,8 +286,8 @@ export function mainTools(host: MainToolsHost, agent: Agent): Tool[] {
         if (args.preview) {
           const preview = host.prompts.preview(args.config)
           return { scope: preview.scope, previews: (['orchestrator', 'worker'] as const).map(role => {
-            const resource = `prompt-preview/${key(agent.id, role, preview[role])}`
-            host.resources.pages.set(`${agent.id}:${resource}`, preview[role])
+            const resource = `prompt-preview/${key(session.id, role, preview[role])}`
+            host.resources.pages.set(`${session.id}:${resource}`, preview[role])
             return { role, chars: preview[role].length, read: resource }
           }) }
         }

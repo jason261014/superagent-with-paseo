@@ -1,5 +1,4 @@
 /** Block-scoped settings validation, optimistic concurrency saves, processing pause control, and source policy synchronization. */
-import type { Context } from '@deepseek-ai/cordis'
 import { z } from 'zod'
 import { UserError, type EngineForSettings } from '../core/index.ts'
 import { EvalConfigSchema, ExecutorConfigSchema, PolicyConfigSchema, SettingsSchema, policyEffects, policyVersion } from '../policy.ts'
@@ -7,7 +6,6 @@ import type { Settings as SettingsValue, SettingsBlock, SettingsOrigin, Settings
 import type { SourceHost } from '../sources/host.ts'
 import type { HealthBoard, HealthEntry } from '../infra/health.ts'
 import type { SourceRegistry } from '../sources/registry.ts'
-import { resolveRoleModel } from './role-models.ts'
 import { changedPaths, settingsNotice } from './notices.ts'
 import type { Sessions } from './sessions.ts'
 import { setupChanged, type Setup } from './setup.ts'
@@ -60,8 +58,8 @@ export interface SettingsHost {
   readonly engine: EngineForSettings
   /** Health board where each source's policy sync reports under `sync:<id>`. */
   readonly health: Pick<HealthBoard, 'claim'>
-  /** DSH Cordis context used to validate and resolve role models. */
-  readonly context: Context
+  /** Session adapters may validate their own model settings without consulting DSH's model registry. */
+  validateModel(model: NonNullable<SettingsValue['eval']['model']>): Promise<unknown>
   readonly lifetime: AbortSignal
   /** Session manager through which the main Session is notified of saved settings. */
   readonly sessions: Pick<Sessions, 'notify' | 'delivery'>
@@ -160,7 +158,7 @@ export class Settings {
     const model = block === 'eval' ? candidate.eval.model : block === 'executor' ? candidate.executor.model : null
     const previous = block === 'eval' ? current.eval.model : block === 'executor' ? current.executor.model : null
     if (model && JSON.stringify(model) !== JSON.stringify(previous)) {
-      try { await resolveRoleModel(this.host.context, model) }
+      try { await (this.host.validateModel(model)) }
       catch (error) { throw new UserError('modelUnavailable', { block, error: error instanceof Error ? error.message : String(error) }) }
     }
     rules.guard?.(current, candidate, origin)

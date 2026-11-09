@@ -1,6 +1,10 @@
 import { expect, it, vi } from 'vitest'
-import { Config, type Machine } from '../src/deployment.ts'
+import { Context } from '@deepseek-ai/cordis'
+import { type Machine } from '../src/deployment.ts'
+import { Config } from '../src/hosts/dsh-config.ts'
 import { apply } from '../src/index.ts'
+import { createDshRuntime } from '../src/hosts/dsh.ts'
+import { testMachine } from './fixtures/deployment.ts'
 
 // Stub Runtime to capture the resolved Machine settings and restart callback.
 const runtimes = vi.hoisted(() => [] as { machine: Machine; restart: () => void }[])
@@ -21,6 +25,8 @@ function context() {
     on: vi.fn((name: string, handler: () => void) => { handlers.set(name, handler) }),
     inject: vi.fn((_services: string[], callback: (child: unknown) => void) => { callback({ effect: (effect: () => unknown) => effect(), settings: { configure } }) }),
     effect: vi.fn(),
+    provide: vi.fn(() => () => {}),
+    set: vi.fn(),
     fiber: { restart: vi.fn(async () => {}) },
     get: vi.fn((name: string) => name === 'settings' ? { describe } : undefined),
     logger: { info: vi.fn(), error: vi.fn() },
@@ -59,4 +65,12 @@ it('refuses keys of the previous configuration before registering anything', asy
   await expect(apply(ctx as never, Config({ stateDir: '/srv/state', github: { cli: 'gh' } } as never))).rejects.toThrow('github (now on the GitHub Source)')
   expect(ctx.on).not.toHaveBeenCalled()
   expect(ctx.inject).not.toHaveBeenCalled()
+})
+
+it('provides the shared Runtime through Cordis and unregisters it with its owning fiber', async () => {
+  const ctx = new Context()
+  const runtime = createDshRuntime(ctx, testMachine({ stateDir: '/unused-test-state' }), () => {})
+  expect(ctx.get('orchestrator')).toBe(runtime)
+  await ctx.fiber.dispose()
+  expect(ctx.get('orchestrator')).toBeUndefined()
 })

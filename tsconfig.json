@@ -24,6 +24,9 @@
     "src/**/*.tsx",
     "tests/**/*.ts",
     "tests/**/*.tsx",
-    "tsdown.config.ts"
+    "tsdown.config.ts",
+    "paseo-plugin/index.server.ts",
+    "paseo-plugin/generated.d.ts",
+    "paseo-plugin/shared/*.ts"
   ]
 }

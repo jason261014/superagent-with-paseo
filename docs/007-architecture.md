@@ -36,7 +36,7 @@ Shutdown cancels turns, waits for passes, effects and agents, restores the proce
 
 | Part | Module | Does |
 | --- | --- | --- |
-| Setup | `src/app/setup.ts` | Resolves the repository and the accounts by probing their CLIs the way worker shells run them, writes and applies the workers' environment and command shims, and keeps the setup problems; Settings checks a changed account through it, and restarts through it, which runs setup again |
+| Setup | `src/app/setup.ts` | Resolves GitHub accounts by probing their CLIs when a repository is configured, otherwise resolves a local deployment, writes and applies the workers' environment and command shims, and keeps the setup problems; Settings checks a changed account through it, and restarts through it, which runs setup again |
 | Passes | `src/app/passes.ts` | One pass at a time, every two seconds and whenever a command asks: the due effects, then `Engine.evaluateDue`; a Source's Trigger reaches the Engine through it |
 | Outbox | `src/app/outbox.ts` | The Engine's `Outbox` port, and the only writer of the receipts: `send` keeps a message's receipt and queues its `reply` effect in one transaction, and the effect's handler sends it through `SourceRegistry.send`; a message waits while its Source is off, and is dropped when the conversation is gone or not listened to |
 | Notices | `src/app/notices.ts` | Converts domain events and worker activity into main-Session messages. `eventNotice` handles domain notices; `reportRelay` forwards questions immediately, keeps ordinary progress on its Ticket, and relays other reports; `followupRelay` names the Tickets that own a human follow-up. Relays arriving during a turn are delivered together at its next step through the DeepSeek Harness inbox |
@@ -244,7 +244,7 @@ Each model request binds the Session to the current prompt revision. The revisio
 
 | Glue | Translates |
 | --- | --- |
-| `src/app/runtime.ts` | The composition root: builds the parts with the interfaces they use, registers the routes and the Source host, and starts and stops dsh-superagent |
+| `src/app/runtime.ts` | The host-neutral composition root: builds the parts, optionally mounts host-provided HTTP routes, and owns application startup, shutdown, Store and state lock; the DSH adapter registers the Source host service |
 | `src/app/notices.ts` | Domain events and worker reports into notices and relays for the main Session |
 | `src/app/tools/main.ts`, `src/app/tools/executor.ts` | Tool arguments of the main Session and the Executor Sessions into calls of the core classes, and their results into cards |
 | `src/app/http.ts`, `src/app/views/`, `src/app/api.ts` | HTTP requests into calls, and Store reads into the panel's views; `api.ts` types every route for the panel |
@@ -290,8 +290,49 @@ Some generic modules still refer directly to GitHub or Feishu:
 
 | Path | Responsibility |
 | --- | --- |
+| `src/hosts/contracts.ts` | Runtime host and backend ports, independent of Cordis values |
+| `src/hosts/dsh-config.ts` | DSH Schemastery configuration and volatile settings adapter |
+| `src/hosts/dsh.ts` | Cordis registration and original DSH backend wiring |
+| `src/hosts/paseo.ts` | Validated standalone Paseo host, startup cancellation and lock waiting |
+| `src/hosts/lifecycle.ts` | Host status and bounded waiting without releasing live resources |
+| `src/hosts/paseo-config.ts` | Data-only standalone host configuration |
+| `src/projects/config.ts`, `registry.ts`, `catalog.ts` | Project registration, canonical paths, durable auto-registration catalog and configuration modes |
+| `src/projects/protocol.ts`, `child.ts`, `process.ts` | Private project process protocol, standalone entry and owned child lifecycle |
+| `src/projects/intents.ts`, `entry-agents.ts`, `manager.ts`, `management.ts`, `cli.ts`, `index.ts` | Durable running intent and entry-agent parentage, project process ownership and private management control |
+| `src/paseo-ui/project-router.ts` | Durable project-bound provider sessions with legacy restoration |
+| `src/paseo-ui/project-persistence.ts` | Shared project persistence envelope and single-host rollback compatibility |
+| `src/executor/shared.ts` | Shared ticket instructions, message payloads and workspace preparation |
+| `src/infra/worker-command.ts` | Filtered Node command runner with bounded output and cancellation |
+| `src/paseo/backend.ts` | Paseo sessions, executor, tool bridge and report assembly |
+| `src/paseo-ui/host-control.ts` | One embedded host per plugin with cancellable dynamic ESM loading |
+| `src/paseo/client.ts` | Paseo public session adapter for opt-in coordinator and worker sessions |
+| `src/paseo/bridge.ts` | Owner-only role-bound MCP tool bridge that exposes original coordinator/worker tools to Paseo |
+| `src/paseo/mcp.ts` | Paseo stdio MCP entrypoint forwarding calls to the private tool bridge |
+| `src/paseo/reports.ts` | Durable assignment-bound report receipts and early-report replay |
+| `src/paseo/sessions.ts` | Narrow Paseo session creation, prompt delivery and lifecycle port |
+| `src/paseo/transcript.ts` | Public timeline projection into existing transcript resources, with agent/epoch/sequence-bound message links |
+| `src/paseo-control/journal.ts` | SQLite-backed Paseo operation identities and uncertain-result reconciliation |
+| `src/delivery/snapshot.ts` | Private selected-file snapshots and content verification; not wired to ticket acceptance |
+| `src/flow-web/model.ts` | Shared read-only canvas DTOs, lane coordinates, and timeline/unknown evidence types |
+| `src/flow-web/project.ts` | Deterministic Store-to-canvas projection: full fanout, historical worker identities, report/intent evidence, and strict redaction |
+| `src/flow-web/server.ts` | Loopback-only token-guarded read-only HTTP service for the canvas and its `/api/flow/*` routes |
+| `src/flow-web/ui/App.tsx` | React Flow four-pane canvas: request list, swimlanes, evidence drawer, event timeline |
+| `src/flow-web/ui/index.tsx` | Standalone browser entry for the flow canvas |
+| `src/flow-web/ui/styles.css` | Flow canvas layout and node/edge styling |
+| `src/flow-web/ui/index.html` | Static shell for the standalone flow canvas build |
+| `src/flow-web/ui/assets.d.ts` | Type declaration for `?raw` stylesheet imports |
+| `src/executor/paseo.ts` | Opt-in Paseo Executor preserving upstream assignment and completion semantics |
+| `src/sources/local.ts` | Default-closed local Source/Channel, atomic replay checks and ordered persistent replies through the official Outbox |
+| `src/local/transport.ts` | Opt-in owner-only Unix socket, lifecycle and bounded request client for the official Runtime |
+| `src/local/cli.ts` | Submit explicit local requests and read status/replies without starting a host |
+| `src/local/conversation.ts` | Durable binding, request receipts, conversation event index and ticket context for the Paseo provider |
+| `src/local/protocol.ts` | Zod-validated private conversation binding, request, receipt and event protocol |
+| `src/paseo-ui/connection.ts` | Paseo provider session lifecycle, prompt delivery, replay and event polling |
+| `src/paseo-ui/pending.ts` | Crash-durable owner-local journal for prompts waiting to be submitted or reconciled |
+| `src/paseo-ui/provider.ts` | Registration of the no-model `superagent` provider and its capability contract |
+| `src/paseo-ui/transport.ts` | Typed client for the Runtime's private Paseo conversation IPC endpoints |
 | `src/index.ts` | The main plugin entry: reads the machine settings, starts the Runtime, and gives it the restart that a save of a Source's account uses |
-| `src/deployment.ts` | The plugin `Config` and `Machine`; `resolveDeployment` and `resolveFeishuBot` read the repository and the accounts from the Source settings, each CLI run as Executor shells run it; `SETUP_FIELDS` lists the Source fields setup reads. The code names no person, account or organization |
+| `src/deployment.ts` | Host-neutral `Machine` and account schemas; `resolveDeployment`, `localDeployment` and `resolveFeishuBot` read the repository and the accounts from the Source settings, each CLI run as Executor shells run it; `SETUP_FIELDS` lists the Source fields setup reads. The code names no person, account or organization |
 | `src/setup.ts` | Setup problems: `SetupError`, with a code, the place that fixes it and the English text the log, the main Session and the panel share |
 | `src/policy.ts` | The Policy: the settings schemas by block, the Policy version, the gate and Mandate revalidation |
 | `src/admission.ts` | The admission table's values, each cell's options and defaults, shared with the panel |
@@ -403,6 +444,30 @@ Some generic modules still refer directly to GitHub or Feishu:
 
 | Test | Covers |
 | --- | --- |
+| `tests/host-boundaries.spec.ts` | DSH-free runtime dependency boundary |
+| `tests/project-registry.spec.ts` | Canonical project registration, disabled roots and ownership conflicts |
+| `tests/project-auto-register.spec.ts` | First-use workspace registration, catalog persistence and restart recovery |
+| `tests/project-process.spec.ts` | Real per-project process environments, bounded cleanup and parent disconnection |
+| `tests/project-manager.spec.ts` | Demand coalescing, persistent manual stop, restoration and shutdown races |
+| `tests/project-management.spec.ts` | Private project control and CLI without database access |
+| `tests/project-provider.spec.ts` | Project persistence, legacy upgrade and cross-project input isolation |
+| `tests/projects-integration.spec.ts` | Two real isolated Runtime processes, original tools, project replies and flow servers |
+| `tests/host-build.spec.ts` | Standalone build graph excludes DSH value modules; built host boots from another cwd and reopens its state with DSH resolution denied |
+| `tests/worker-command.spec.ts` | Environment filtering, process exit, output limits and real cancellation |
+| `tests/flow-web-project.spec.ts` | Canvas projection: fanout, multi-assignment worker identity, missing timestamps, unconfirmed intents, redaction |
+| `tests/flow-web-server.spec.ts` | Flow web auth, read-only methods, host lifecycle mounting and ordered shutdown |
+| `tests/flow-web-ui.spec.tsx` | Flow canvas rendering, history expansion, timeline highlighting, selection stability |
+| `tests/paseo-host.spec.ts` | Independent startup, configuration, cancellation and state directory ownership |
+| `tests/host-lifecycle.spec.ts` | Bounded waiting and cross-process database lock handoff |
+| `tests/paseo-plugin-host.spec.ts` | Embedded and external plugin host lifecycle |
+| `tests/paseo-client.spec.ts` | Paseo adapter identity, pagination and interruption boundaries |
+| `tests/paseo-transcript.spec.ts` | Paseo message/tool projection, reasoning omission, stable links and unavailable history |
+| `tests/paseo-control-journal.spec.ts` | Durable operation identity and uncertain-result reconciliation |
+| `tests/paseo-executor.spec.ts` | Paseo Executor effect and assignment boundaries |
+| `tests/paseo-sessions.spec.ts` | Paseo worker parent labels and delegated-agent grouping |
+| `tests/paseo-local-source.spec.ts` | Local admission, replay conflicts, questions, follow-ups and original completion through Engine/Outbox |
+| `tests/local-transport.spec.ts` | Unix socket permissions, CLI behavior, request bounds and transport shutdown |
+| `tests/delivery-snapshot.spec.ts` | Selected-file snapshots and content verification |
 | `tests/core-engine.spec.ts` | Domain rules on in-memory repositories: receiving, Eval, fan-out, resume and stop, interrupted Assignments, the pause, Policy changes, reports and outcomes, attaching, replies, failed deliveries and dismissed problems |
 | `tests/stage.spec.ts` | The Ticket stages, row by row |
 | `tests/policy.spec.ts` | Source scope, the gate, the admission table, Mandate revalidation, the Policy version, settings migrations and assessment outcomes |
@@ -424,6 +489,8 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/delivery.spec.ts` | `AgentDelivery` |
 | `tests/retry-health.spec.ts`, `tests/role-models.spec.ts` | Model budget retries, and the models of the two roles |
 | `tests/runtime.spec.ts` | The whole application on a simulated DeepSeek Harness host, through tools and HTTP |
+| `tests/local-conversation.spec.ts` | Conversation binding, idempotent receipts, event replay and ticket context |
+| `tests/paseo-ui.spec.ts` | Provider capabilities, prompt validation, persistence, polling and interruption behavior |
 | `tests/tools.spec.ts` | The Sessions' tools: what `orchestrator_read` reads for each role, and the shapes and checks of the other main Session tools |
 | `tests/runtime-concurrency.spec.ts` | Work that overlaps: Triggers during a pass, Tickets that change during deliveries and launches |
 | `tests/http.spec.ts` | The same-origin and loopback checks, the status of each kind of failure, the body limit, path parameters and queries |
@@ -558,7 +625,7 @@ Ticket cards use the closed `TICKET_STATES` set from `src/app/cards.ts`: an open
 | `thread/<key>` | Label, Tickets, recent Decisions and a page of Triggers |
 | `trigger/<id>` | Message text, replied-to Trigger and neighboring messages, excluding CI runs |
 | `ticket/<id>` | Related ids, source-batch Triggers, Threads, and first pages of Assignments and Inputs |
-| Ticket subresources | `/assignments`, `/inputs`, `/assignment`, `/result`, `/report/<assignment id>`, `/transcript`, `/message/<n>`, `/input/<id>` |
+| Ticket subresources | `/assignments`, `/inputs`, `/assignment`, `/result`, `/report/<assignment id>`, `/transcript`, `/message/<entry>` (DSH index or opaque Paseo ID), `/input/<id>` |
 | `settings`, `settings/<block>` | Revisions and summaries, or a complete block ready to save |
 | `prompts`, `prompts/<revision>`, `prompts/current`, `prompts/defaults`, `prompt-preview/<id>` | Prompt configurations and composed text |
 | `models`, `models/<provider>` | Available models |
@@ -603,9 +670,11 @@ Most built-in instructions live in `prompts/*.md`, with one sentence per line jo
 
 ## Configuration reload
 
-Every plugin configuration key except `stateDir` is volatile. The panel's Deployment settings and DeepSeek Harness's Plugin Manager edit them through DeepSeek Harness's configuration form; the host writes `cordis.patch.yml` and updates the values in place, and dsh-superagent reads each limit when it uses it, so a change applies without a restart.
+In the DSH host, the numeric limits (`promptMaxChars`, `admissionContextMaxPages`, `admissionContextTimeoutMs`) are volatile. The panel's Deployment settings and DeepSeek Harness's Plugin Manager edit them through DeepSeek Harness's configuration form; the host writes `cordis.patch.yml` and updates the values in place, and dsh-superagent reads each limit when it uses it. Changing `stateDir`, `localRequests` or `paseo` requires a restart. The embedded Paseo host instead reads plain local plugin configuration; changing that configuration requires reloading the plugin. Existing agent configurations remain frozen.
 
 A settings save that changes a Source field setup reads, such as an account's CLI, and any save while setup waits, restarts dsh-superagent. DeepSeek Harness's settings service does not serve the entry during that restart, so after its own restart dsh-superagent asks it to read the entry again, and an open form becomes editable again.
+
+The embedded host does not expose the DSH management panel. A setup change that requires restart stops that host and asks the operator to reload the plugin; it does not start a second Runtime while the previous instance still owns its state.
 
 ## Reviewing a change against real data
 

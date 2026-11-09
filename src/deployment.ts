@@ -1,47 +1,25 @@
 /** Plugin configuration and startup verification for repository access and agent CLI identities. */
-import { LIMITS } from './limits.ts'
+import type { RunWorkerCommand } from './infra/worker-command.ts'
 import { accessSync, constants, statSync } from 'node:fs'
 import { delimiter, isAbsolute, join } from 'node:path'
-import type { Volatile } from '@deepseek-ai/cordis'
-import s from '@deepseek-ai/schemastery'
 import { z } from 'zod'
 import type { SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
 import { runAsWorker, sameDirectory, withoutDirectory, workerBin } from './infra/environment.ts'
 import { SetupError } from './setup.ts'
+import type { PaseoConfig } from './paseo/sessions.ts'
 
 const reason = (error: unknown): string => error instanceof Error ? error.message : String(error)
-const absolute = (description: string) => s.string().pattern(/^\//).description(`${description} Absolute path.`)
-/** Plugin configuration of the dsh-superagent entry. Volatile fields apply without a restart because dsh-superagent reads them on each use; changing `stateDir` remounts the plugin. */
-export const Config = s.object({
-  stateDir: absolute('Directory for the database, locks, worker shims, the agent\'s git configuration and, by default, the ticket directories.').required(),
-  promptMaxChars: s.number().min(LIMITS.promptMaxChars.min).max(LIMITS.promptMaxChars.max).step(1).default(100000)
-    .description('Largest saved prompt configuration, in characters.').volatile(),
-  admissionContextMaxPages: s.number().min(LIMITS.admissionContextMaxPages.min).max(LIMITS.admissionContextMaxPages.max).step(1).default(10)
-    .description('Pages of thread context one assessment may read.').volatile(),
-  admissionContextTimeoutMs: s.number().min(LIMITS.admissionContextTimeoutMs.min).max(LIMITS.admissionContextTimeoutMs.max).step(1)
-    .default(15000).description('Time limit of one context read during an assessment, in milliseconds.').volatile(),
-})
-export type DeploymentConfig = ReturnType<typeof Config>
 export interface Machine {
   stateDir: string
-  promptMaxChars: Volatile<number>
-  admissionContextMaxPages: Volatile<number>
-  admissionContextTimeoutMs: Volatile<number>
+  workspaceDir?: string
+  localRequests?: boolean
+  /** The Paseo provider is the local user entry point, so a fresh state enables the local Source. */
+  localEntry?: boolean
+  paseo?: PaseoConfig
+  promptMaxChars: { get(): number }
+  admissionContextMaxPages: { get(): number }
+  admissionContextTimeoutMs: { get(): number }
 }
-const MOVED: Record<string, string> = {
-  repository: 'on the GitHub Source', branchPrefix: 'in the prepare command of the Execution settings', github: 'on the GitHub Source',
-  feishu: 'on the Feishu Source', author: 'prompt text', repositoryPath: 'in the prepare command of the Execution settings',
-  worktreeRoot: 'the ticket directory of the Execution settings', blockedCommands: 'in the Execution settings',
-}
-
-/** Read machine settings and reject unknown configuration keys (naming where deprecated keys moved). */
-export function machineOf(config: DeploymentConfig): Machine {
-  const unknown = Object.keys(config).filter(key => !(key in (Config.dict ?? {})))
-  if (unknown.length) throw new Error(`dsh-superagent configuration has keys it does not use: ${unknown.map(key => MOVED[key] ? `${key} (now ${MOVED[key]})` : key).join(', ')}; docs/006-deployment.md lists the keys`)
-  const { stateDir, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs } = config
-  return { stateDir, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs }
-}
-
 export const GithubAccountsSchema = z.object({
   repository: z.string().trim().regex(/^([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?$/, 'owner/name').default(''),
   cli: z.string().trim().default(''),
@@ -53,6 +31,8 @@ export const SETUP_FIELDS: Readonly<Record<string, readonly string[]>> = { githu
 export interface Deployment extends Machine {
   repository: string
   github: { cli: string; login: string; noreply: string }
+  /** True when no GitHub repository is configured and the runtime only works in the local workspace. */
+  local: boolean
   feishu?: FeishuBot
 }
 export interface FeishuBot { cli: string; appId: string; brand: 'feishu' | 'lark'; botId: string; name: string }
@@ -69,8 +49,8 @@ export function executable(name: string, path: string, exclude?: string): string
 }
 
 export type Probe = (argv: string[]) => Promise<string>
-/** Run startup checks through DSH's worker subprocess service with worker shims removed from PATH so a `gh` wrapper script reaches the real binary. */
-export function workerProbe(subprocess: SubprocessRuntime, stateDir: string, cwd: string, signal: AbortSignal): Probe {
+/** Run startup checks through the host's worker command port with worker shims removed from PATH so a `gh` wrapper reaches the real binary. */
+export function workerProbe(subprocess: SubprocessRuntime | RunWorkerCommand, stateDir: string, cwd: string, signal: AbortSignal): Probe {
   const path = withoutDirectory(process.env.PATH ?? '', workerBin(stateDir))
   return argv => runAsWorker(subprocess, ['env', `PATH=${path}`, ...argv], cwd, AbortSignal.any([signal, AbortSignal.timeout(60_000)]))
 }
@@ -102,7 +82,12 @@ export async function resolveDeployment(machine: Machine, github: unknown, probe
   if (!access) throw new SetupError('repositoryUnreported', { repository: remote })
   const repository = access.name
   if (access.push !== true) throw new SetupError('repositoryReadOnly', { account: agent.login, repository })
-  return { ...machine, repository, github: { cli, login: agent.login, noreply: `${agent.id}+${agent.login}@users.noreply.github.com` } }
+  return { ...machine, repository, local: false, github: { cli, login: agent.login, noreply: `${agent.id}+${agent.login}@users.noreply.github.com` } }
+}
+
+/** A deployment without GitHub: the orchestrator and workers remain usable inside the workspace itself. */
+export function localDeployment(machine: Machine): Deployment {
+  return { ...machine, repository: '', local: true, github: { cli: '', login: 'local', noreply: 'local@localhost' } }
 }
 
 const AuthStatus = z.object({ appId: z.string().regex(/^cli_[A-Za-z0-9]+$/), brand: z.enum(['feishu', 'lark']).default('feishu'), identities: z.object({ bot: z.object({ status: z.string() }) }) })

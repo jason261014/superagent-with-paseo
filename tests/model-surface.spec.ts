@@ -12,7 +12,8 @@ import { latestAssignment } from '../src/core/index.ts'
 import { promptParts } from '../src/app/prompts.ts'
 import { RESOURCES } from '../src/app/resources.ts'
 import { TICKET_STATES } from '../src/app/cards.ts'
-import { Runtime } from '../src/app/runtime.ts'
+import type { Runtime } from '../src/app/runtime.ts'
+import { createDshRuntime } from '../src/hosts/dsh.ts'
 import { workerSessionId } from '../src/executor/dsh.ts'
 import { Store } from '../src/app/store.ts'
 import { Commands } from '../src/infra/commands.ts'
@@ -140,7 +141,7 @@ async function start() {
   const github = { enabled: true, config: { repository: 'acme/widgets', cli: AGENT } }
   seed.saveSettings(SettingsSchema.parse({ ...seed.settings(), sources: { github, feishu: { enabled: true, config: { cli: BOT } } } }))
   seed.close()
-  const runtime = new Runtime(ctx, testMachine({ stateDir: directory }), () => {})
+  const runtime = createDshRuntime(ctx, testMachine({ stateDir: directory }), () => {})
   await runtime.ready
   runtime.sources.register(feishuKind); runtime.sources.register(githubKind)
   const settings = runtime.store.settings()

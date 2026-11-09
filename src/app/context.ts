@@ -25,6 +25,13 @@ export const handoffPolicy = (role: 'orchestrator' | 'worker'): string => `${han
 
 export const autoMergeThreshold = (lines: number): string => `it changes fewer than ${lines} lines (additions plus deletions);`
 
+/** Shared read-only message view; a backend may supply an opaque ID instead of a DSH event index. */
+export interface TranscriptEntry {
+  id?: string
+  type: string
+  message: { role: string; content: { type: string; text?: string }[] }
+}
+
 /** Retains message content while omitting streamed chunks, usage accounting, and reasoning blocks. */
 export function transcriptEntry(event: SessionEvent) {
   if (event.type !== 'user/message' && event.type !== 'tool/result' && event.type !== 'assistant/message') return undefined

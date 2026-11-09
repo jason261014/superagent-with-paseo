@@ -1,6 +1,5 @@
 /** Main-session assessor per-eval state and context loading. */
 import { expect, it, vi } from 'vitest'
-import type { Agent } from '@deepseek-ai/dsh-agent'
 import { AssessmentSchema, EvalReadSchema, MasterAssessor, type AssessorHost } from '../src/app/assessment.ts'
 import { mainAdmissionPolicy } from '../src/app/context.ts'
 import { Engine, MemoryRepositories, type Executor, type Policy, type Trigger } from '../src/core/index.ts'
@@ -49,7 +48,7 @@ function setup(strength: 'explicit' | 'inferred' = 'inferred', bodies = Array.fr
   const outbox = { send: () => {}, status: () => undefined, withdraw: () => {} }
   engine = new Engine({ repo, policy: () => policy, scope, assessor, executor, outbox })
   const tools: Record<string, (args: unknown, signal: AbortSignal) => Promise<unknown>> = {}
-  tools.orchestrator_eval_read = (args, signal) => assessor.read({} as Agent, EvalReadSchema.parse(args), signal)
+  tools.orchestrator_eval_read = (args, signal) => assessor.read(EvalReadSchema.parse(args), signal)
   tools.orchestrator_eval_decide = (args, signal) => {
     const { trigger_id, ...result } = args as { trigger_id: string }
     return assessor.decide(trigger_id, AssessmentSchema.parse(result), signal)
@@ -120,6 +119,22 @@ it('routes an explicit candidate instead of assessing it: each eval tool names t
   const direction = { implementation_requested: false, target_basis: 'undetermined', requires_design_decision: false, evidence: 'chatter' }
   const decision = { trigger_id: 'issue-1', decision: 'ignore', rule_assessments: [], direction, title: 't', scope: 's', reason: 'r' }
   await expect(s.tools.orchestrator_eval_decide!(decision, signal)).rejects.toThrow(routed)
+})
+
+it('delegates image attachments to the session capability and refuses missing or unknown image support', async () => {
+  const message = { id: 'message-1', from: 'bob', at: '2026-11-05T00:00:00Z', text: 'Image img-1' }
+  const source = { messageId: message.id, read: async () => ({ messages: [message], body: {} }),
+    images: () => ['img-1'], image: vi.fn() }
+  const s = setup('inferred', undefined, () => source)
+  s.engine.receive({ ...issue(1), text: message.text }); s.engine.evaluateDue()
+  const read = EvalReadSchema.parse({ trigger_id: 'issue-1', resource: 'image', image_id: 'message-1/img-1' })
+  await expect(s.assessor.read(read, signal)).rejects.toThrow('does not support source image attachments')
+  const attach = vi.fn(async () => ({ image: 'attachment' }))
+  await expect(s.assessor.read(read, signal, attach)).resolves.toEqual({ image: 'attachment' })
+  expect(attach).toHaveBeenCalledWith(source, expect.anything(), { id: message.id, text: message.text }, 'img-1', signal)
+  await expect(s.assessor.read({ ...read, image_id: 'unknown/img-1' }, signal, attach)).rejects.toThrow('Unknown image reference')
+  expect(attach).toHaveBeenCalledTimes(1)
+  expect(source.image).not.toHaveBeenCalled()
 })
 
 it('asks the assessment only for decisions its tool accepts, which no longer include reopen or stop', () => {

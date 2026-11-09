@@ -1,13 +1,15 @@
 /** Probes repository and account CLIs, configures the worker execution environment and command shims, and tracks setup readiness. */
-import type { Context } from '@deepseek-ai/cordis'
+import type { HostLogger } from '../hosts/contracts.ts'
+import type { RunWorkerCommand } from '../infra/worker-command.ts'
 import { UserError } from '../core/index.ts'
-import { SETUP_FIELDS, resolveDeployment, resolveFeishuBot, workerProbe, type Deployment, type Machine } from '../deployment.ts'
+import { GithubAccountsSchema, SETUP_FIELDS, localDeployment, resolveDeployment, resolveFeishuBot, workerProbe, type Deployment, type Machine } from '../deployment.ts'
 import { agentVariables, applyEnvironment, verifyEnvironment, withoutDirectory, workerBin, writeEnvironment } from '../infra/environment.ts'
 import type { Settings, SettingsBlock } from '../policy.ts'
 import { SetupError, type SetupProblem } from '../setup.ts'
 
 export interface SetupHost {
-  readonly context: Context
+  readonly logger: HostLogger
+  readonly runWorker: RunWorkerCommand
   readonly machine: Machine
   readonly lifetime: AbortSignal
   restart(): void
@@ -70,17 +72,20 @@ export class Setup {
   restore(): void { this.restoreEnvironment?.(); this.restoreEnvironment = undefined }
   /** Probes CLIs the way worker shells run them, using `stateDir` as `cwd` since it exists even before the repository clone is valid. */
   private probe() {
-    const { context, machine, lifetime } = this.host
-    return workerProbe(context.subprocess, machine.stateDir, machine.stateDir, lifetime)
+    const { runWorker, machine, lifetime } = this.host
+    return workerProbe(runWorker, machine.stateDir, machine.stateDir, lifetime)
   }
   private async resolve(settings: Settings): Promise<Deployment> {
-    const { context, machine, lifetime } = this.host
+    const { logger, runWorker, machine, lifetime } = this.host
     const probe = this.probe()
-    const deployment = await resolveDeployment(machine, settings.sources.github?.config, probe)
+    const accounts = GithubAccountsSchema.parse(settings.sources.github?.config ?? {})
+    const deployment = accounts.repository
+      ? await resolveDeployment(machine, settings.sources.github?.config, probe)
+      : localDeployment(machine)
     const feishu = await resolveFeishuBot(machine, settings.sources.feishu?.config, probe).catch((error: unknown) => {
       if (!(error instanceof SetupError)) throw error
       this.feishuProblem = error.problem
-      context.logger.warn('dsh-superagent leaves Feishu out: %s', error.message)
+      logger.warn('dsh-superagent leaves Feishu out: %s', error.message)
       return undefined
     })
     const resolved = { ...deployment, ...(feishu ? { feishu } : {}) }
@@ -90,7 +95,7 @@ export class Setup {
     }
     await writeEnvironment(resolved, settings.executor.blockedCommands).catch(machineProblem)
     this.restoreEnvironment = applyEnvironment(this.variables, machine.stateDir, this.path)
-    await verifyEnvironment(resolved, context.subprocess, lifetime).catch((error: unknown) => {
+    await verifyEnvironment(resolved, runWorker, lifetime).catch((error: unknown) => {
       this.restore()
       machineProblem(error)
     })

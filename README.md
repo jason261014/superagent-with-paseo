@@ -1,4 +1,6 @@
-# dsh-superagent
+# Superagent with Paseo
+
+This is a fork of the DeepSeek Super Agent research prototype. See [PASEO.md](PASEO.md) for the fork's direction and current integration status. The upstream documentation below describes the existing DSH-based implementation.
 
 > **Research prototype for reference only, not an official DeepSeek product.** This code grew out of our team's day-to-day development work, with much of the engineering done by coding agents. Treat it as research code, not production-ready software. It may still contain bugs, and its coding style and engineering practices may be inconsistent. Review and adapt it before using it in your own environment.
 >
